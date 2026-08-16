@@ -30,6 +30,9 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     private var captureDevice: AVCaptureDevice?
+    /// Last rate actually pushed to the sensor — skips redundant reconfiguration
+    /// (burst-mode toggles would otherwise re-lock the device every state change).
+    private var lastCappedFPS: Double = 0
 
     private(set) var state: State = .stopped {
         didSet {
@@ -41,6 +44,10 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     /// Read-only access for AVCaptureVideoPreviewLayer (debug overlay / bubble preview).
     var captureSession: AVCaptureSession { session }
+
+    /// Sensor's active pixel dimensions (set on configure; .zero before first start).
+    /// The debug overlay needs these to map Vision-normalized boxes onto the preview.
+    private(set) var activeVideoSize: CGSize = .zero
 
     override init() {
         super.init()
@@ -119,6 +126,8 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             }
             session.addInput(input)
             captureDevice = device
+            let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            activeVideoSize = CGSize(width: Int(dimensions.width), height: Int(dimensions.height))
             applyFrameRateCap()
         } catch {
             Log.camera.error("camera input failed: \(error.localizedDescription)")
@@ -150,12 +159,14 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         guard let device = captureDevice,
               let range = device.activeFormat.videoSupportedFrameRateRanges.first else { return }
         let clampedFPS = min(max(analysisFPS, range.minFrameRate), range.maxFrameRate)
+        guard clampedFPS != lastCappedFPS else { return }
         do {
             try device.lockForConfiguration()
             let duration = CMTime(value: 1, timescale: CMTimeScale(clampedFPS))
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
+            lastCappedFPS = clampedFPS
             Log.camera.info("sensor frame rate capped at \(clampedFPS) fps (hardware range \(range.minFrameRate)–\(range.maxFrameRate))")
         } catch {
             Log.camera.warning("frame-rate cap failed: \(error.localizedDescription)")

@@ -141,6 +141,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateCameraRunState()
     }
 
+    /// Burst mode: the steady state analyzes at 10 fps (6 eco), but the moment
+    /// something interesting happens — any intruder candidate, a second face, or a
+    /// non-idle state — every sensor frame (15 fps, the hardware cap) is analyzed.
+    /// Confirmation latency drops to ~0.2 s exactly when it matters; idle power
+    /// stays untouched.
+    private func updateAnalysisRate(faces: Int, intruders: Int) {
+        let engaged = intruders > 0 || faces >= 2
+            || stateMachine.state == .suspicious || stateMachine.state == .alert
+            || stateMachine.state == .cooldown
+        let base: Double = settings.ecoMode ? 6 : 10
+        let target = engaged ? 15 : base
+        if cameraManager.analysisFPS != target {
+            cameraManager.analysisFPS = target
+            Log.detection.debug("analysis rate → \(target, privacy: .public) fps (engaged=\(engaged))")
+        }
+    }
+
     // MARK: - Per-frame observation (MainActor)
 
     private func handle(_ observation: FrameObservation) {
@@ -150,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let assessment = IntruderAssessor.assess(faces: observation.faces,
                                                  config: Self.makeConfig(from: settings))
         stateMachine.handle(assessment, at: observation.timestamp)
+        updateAnalysisRate(faces: observation.faces.count, intruders: assessment.intruders.count)
 
         // Owner-absence tracking: owner seen → remember + drop the absence shield.
         if assessment.owner != nil {
@@ -291,7 +309,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func toggleDebugOverlay() {
-        debugOverlay.toggle(session: cameraManager.captureSession)
+        debugOverlay.toggle(session: cameraManager.captureSession,
+                            videoSize: cameraManager.activeVideoSize)
         faceAnalyzer.verboseAnalysis = debugOverlay.isVisible
     }
 
