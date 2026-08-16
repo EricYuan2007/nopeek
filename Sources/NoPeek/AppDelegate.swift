@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Carbon.HIToolbox
 
 @MainActor
@@ -12,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settings = SettingsStore.shared
     private let hotKeys = GlobalHotKey()
     private var floatingBubble: FloatingPanelController!
+    private let onboarding = OnboardingWindowController()
     private lazy var stateMachine = DetectionStateMachine(config: Self.makeConfig(from: settings))
 
     /// Whether the camera is currently allowed to run (not locked / not asleep).
@@ -71,7 +73,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ])
 
         registerLifecycleObservers()
-        requestCameraAndStart()
+
+        // First run (or camera still denied): explain before asking for the camera.
+        let hasOnboarded = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+        let cameraDenied = AVCaptureDevice.authorizationStatus(for: .video) == .denied
+            || AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined
+        if !hasOnboarded || cameraDenied {
+            onboarding.onFinished = { [weak self] in
+                UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+                self?.requestCameraAndStart()
+            }
+            onboarding.show()
+        } else {
+            requestCameraAndStart()
+        }
         refreshUI()
     }
 
@@ -204,6 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func toggleDebugOverlay() {
         debugOverlay.toggle(session: cameraManager.captureSession)
+        faceAnalyzer.verboseAnalysis = debugOverlay.isVisible
     }
 
     private func openCameraPermissionSettings() {

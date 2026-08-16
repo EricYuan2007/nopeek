@@ -44,7 +44,11 @@ bundle: $(BINARY)
 adhoc:
 	$(MAKE) bundle CERT_NAME=-
 
+# `open` alone would re-activate a stale running instance instead of launching the
+# fresh binary — kill any running copy first.
 run: bundle
+	-@pkill -f "$(APP_NAME).app/Contents/MacOS/$(APP_NAME)" 2>/dev/null
+	@sleep 0.3
 	open "$(APP_DIR)"
 
 clean:

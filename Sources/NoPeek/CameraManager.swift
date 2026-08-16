@@ -25,7 +25,11 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     var onStateChange: ((State) -> Void)?
 
     /// Detection needs ~10 fps, not the camera's native rate. Eco mode sets this to 6.
-    var analysisFPS: Double = 10
+    var analysisFPS: Double = 10 {
+        didSet { queue.async { self.applyFrameRateCap() } }
+    }
+
+    private var captureDevice: AVCaptureDevice?
 
     private(set) var state: State = .stopped {
         didSet {
@@ -114,6 +118,8 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 return
             }
             session.addInput(input)
+            captureDevice = device
+            applyFrameRateCap()
         } catch {
             Log.camera.error("camera input failed: \(error.localizedDescription)")
             state = .error
@@ -130,6 +136,30 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         output.setSampleBufferDelegate(self, queue: queue)
         session.addOutput(output)
         configured = true
+    }
+
+    /// Cap the sensor's own frame rate as close to the analysis rate as the hardware
+    /// allows — without this the camera delivers 30 fps and we silently discard
+    /// two-thirds of frames in the delegate (which still pays the per-frame delivery
+    /// cost). The PTS throttle in captureOutput stays as a safety net.
+    ///
+    /// The rate MUST be clamped into videoSupportedFrameRateRanges first: out-of-range
+    /// values raise an uncatchable NSException (this MacBook camera only does 15–30 fps,
+    /// so 10 fps is unreachable — we cap at 15).
+    private func applyFrameRateCap() {
+        guard let device = captureDevice,
+              let range = device.activeFormat.videoSupportedFrameRateRanges.first else { return }
+        let clampedFPS = min(max(analysisFPS, range.minFrameRate), range.maxFrameRate)
+        do {
+            try device.lockForConfiguration()
+            let duration = CMTime(value: 1, timescale: CMTimeScale(clampedFPS))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+            device.unlockForConfiguration()
+            Log.camera.info("sensor frame rate capped at \(clampedFPS) fps (hardware range \(range.minFrameRate)–\(range.maxFrameRate))")
+        } catch {
+            Log.camera.warning("frame-rate cap failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate (on `queue`)

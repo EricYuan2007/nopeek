@@ -24,6 +24,10 @@ final class FaceAnalyzer: @unchecked Sendable {
     /// at the call site.
     var onObservation: ((FrameObservation) -> Void)?
 
+    /// When true (debug overlay visible), pose/quality runs even for single-face frames
+    /// so the overlay has numbers to show.
+    var verboseAnalysis = false
+
     private let tracker = FaceTracker()
 
     private let rectanglesRequest: VNDetectFaceRectanglesRequest = {
@@ -53,17 +57,29 @@ final class FaceAnalyzer: @unchecked Sendable {
                 return
             }
 
-            landmarksRequest.inputFaceObservations = rawFaces
-            qualityRequest.inputFaceObservations = rawFaces
-            try handler.perform([landmarksRequest, qualityRequest])
+            // With 0–1 faces there is no possible intruder, so the expensive
+            // landmarks/quality pass is skipped — the steady state costs one cheap
+            // rectangle pass per frame. Multi-face frames (or the debug overlay)
+            // get the full treatment.
+            let needsDetail = rawFaces.count > 1 || verboseAnalysis
+
+            if needsDetail {
+                landmarksRequest.inputFaceObservations = rawFaces
+                qualityRequest.inputFaceObservations = rawFaces
+                try handler.perform([landmarksRequest, qualityRequest])
+            }
 
             var poseByUUID: [UUID: VNFaceObservation] = [:]
-            for observation in landmarksRequest.results ?? [] {
-                poseByUUID[observation.uuid] = observation
+            if needsDetail {
+                for observation in landmarksRequest.results ?? [] {
+                    poseByUUID[observation.uuid] = observation
+                }
             }
             var qualityByUUID: [UUID: VNFaceObservation] = [:]
-            for observation in qualityRequest.results ?? [] {
-                qualityByUUID[observation.uuid] = observation
+            if needsDetail {
+                for observation in qualityRequest.results ?? [] {
+                    qualityByUUID[observation.uuid] = observation
+                }
             }
 
             let faces: [FaceInfo] = rawFaces.map { rect in
