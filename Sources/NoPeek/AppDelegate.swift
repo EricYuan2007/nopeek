@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -6,11 +7,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let cameraManager = CameraManager()
     private let faceAnalyzer = FaceAnalyzer()
     private let debugOverlay = DebugOverlayController()
-    private let detectionConfig = DetectionConfig()
-    private lazy var stateMachine = DetectionStateMachine(config: detectionConfig)
+    private let alertManager = AlertManager()
+    private let settingsWindow = SettingsWindowController()
+    private let settings = SettingsStore.shared
+    private let hotKeys = GlobalHotKey()
+    private lazy var stateMachine = DetectionStateMachine(config: Self.makeConfig(from: settings))
 
-    /// Whether monitoring is desired by the user (M4: driven by SettingsStore).
-    private var monitoringWanted = true
     /// Whether the camera is currently allowed to run (not locked / not asleep).
     private var lifecycleActive = true
     private var permissionGranted = false
@@ -23,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusBar = StatusBarController(actions: .init(
             onTogglePause: { [weak self] in self?.togglePause() },
+            onToggleManualBlur: { [weak self] in self?.toggleManualBlur() },
+            onOpenSettings: { [weak self] in self?.settingsWindow.show() },
+            onOpenCameraPermission: { [weak self] in self?.openCameraPermissionSettings() },
             onToggleDebugOverlay: { [weak self] in self?.toggleDebugOverlay() }
         ))
 
@@ -41,12 +46,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stateMachine.onTransition = { [weak self] from, to, trigger in
             // Fired synchronously from handle(_:) — already on MainActor.
             Log.detection.info("state \(from.rawValue, privacy: .public) → \(to.rawValue, privacy: .public)")
-            self?.handleStateTransition(to: to, trigger: trigger)
+            self?.handleStateTransition(from: from, to: to, trigger: trigger)
         }
+
+        settings.onChange = { [weak self] in self?.applySettings() }
+
+        // Global escape hatches — crucial when the shield frosts the whole screen.
+        hotKeys.register([
+            .init(keyCode: UInt32(kVK_ANSI_B), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+                self?.toggleManualBlur()
+            },
+            .init(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+                self?.togglePause()
+            },
+        ])
 
         registerLifecycleObservers()
         requestCameraAndStart()
         refreshUI()
+    }
+
+    // MARK: - Settings → pipeline push
+
+    private static func makeConfig(from settings: SettingsStore) -> DetectionConfig {
+        var config = DetectionConfig()
+        config.minIntruderArea = settings.minIntruderArea
+        config.requireKnownPose = settings.strictPoseMode
+        config.suppressStaticFaces = settings.suppressStaticFaces
+        if settings.strictPoseMode {
+            config.maxYawRad = 25 * .pi / 180
+            config.maxPitchRad = 20 * .pi / 180
+        }
+        return config
+    }
+
+    private func applySettings() {
+        stateMachine.updateConfig(Self.makeConfig(from: settings))
+        cameraManager.analysisFPS = settings.ecoMode ? 6 : 10
+        updateCameraRunState()
     }
 
     // MARK: - Per-frame observation (MainActor)
@@ -55,7 +92,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         debugOverlay.update(observation)
         lastFaceCount = observation.faces.count
 
-        let assessment = IntruderAssessor.assess(faces: observation.faces, config: detectionConfig)
+        let assessment = IntruderAssessor.assess(faces: observation.faces,
+                                                 config: Self.makeConfig(from: settings))
         stateMachine.handle(assessment, at: observation.timestamp)
 
         observationCount += 1
@@ -71,22 +109,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshStatusLine()
     }
 
-    // MARK: - State transitions
+    // MARK: - State transitions → alerts
 
-    private func handleStateTransition(to state: DetectionState, trigger: Assessment?) {
-        if state == .alert, let trigger {
-            Log.alert.info("ALERT — intruders=\(trigger.intruders.count)")
+    private func handleStateTransition(from: DetectionState, to: DetectionState, trigger: Assessment?) {
+        if to == .alert {
+            Log.alert.info("ALERT — intruders=\(trigger?.intruders.count ?? 0)")
+            alertManager.alertStarted()
+        } else if from == .alert {
+            alertManager.alertEnded()
+        }
+        if to == .off {
+            alertManager.alertEnded() // safety: leaving alert via disable
         }
         refreshUI()
-        // M4: AlertManager.alertStarted / alertEnded hook in here.
     }
 
     private func handleCameraState(_ state: CameraManager.State) {
         if state == .running {
             stateMachine.notifyCameraRunning()
-        }
-        if state == .error {
-            Log.camera.error("camera error — indicator off")
         }
         refreshUI()
     }
@@ -97,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let indicator: StatusBarController.Indicator
         if !permissionGranted {
             indicator = .noPermission
-        } else if !monitoringWanted {
+        } else if !settings.monitoringEnabled {
             indicator = .paused
         } else {
             switch stateMachine.state {
@@ -108,11 +148,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .suspicious:
                 indicator = .suspicious
             case .alert:
-                indicator = .alert
+                // Visual alert is itself a toggleable output.
+                indicator = settings.alertVisual ? .alert : .safe
             }
         }
         statusBar.setIndicator(indicator)
-        statusBar.setPaused(!monitoringWanted)
+        statusBar.setPaused(!settings.monitoringEnabled)
+        statusBar.setManualBlurActive(alertManager.manualBlurActive)
         refreshStatusLine()
     }
 
@@ -120,7 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let text: String
         if !permissionGranted {
             text = "无摄像头权限"
-        } else if !monitoringWanted {
+        } else if !settings.monitoringEnabled {
             text = "已暂停"
         } else {
             switch stateMachine.state {
@@ -138,13 +180,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     private func togglePause() {
-        monitoringWanted.toggle()
-        Log.app.info("monitoring wanted=\(self.monitoringWanted)")
-        updateCameraRunState()
+        settings.monitoringEnabled.toggle()
+        Log.app.info("monitoring enabled=\(self.settings.monitoringEnabled)")
+        // SettingsStore.onChange → applySettings → updateCameraRunState.
+    }
+
+    private func toggleManualBlur() {
+        alertManager.toggleManualBlur()
+        refreshUI()
     }
 
     private func toggleDebugOverlay() {
         debugOverlay.toggle(session: cameraManager.captureSession)
+    }
+
+    private func openCameraPermissionSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: - Camera bring-up
@@ -155,7 +208,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             permissionGranted = granted
             if !granted {
                 Log.app.warning("camera not authorized — monitoring inactive")
-                // M4: settings deep link in the status menu.
             }
             updateCameraRunState()
         }
@@ -189,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateCameraRunState() {
-        let shouldRun = monitoringWanted && lifecycleActive && permissionGranted
+        let shouldRun = settings.monitoringEnabled && lifecycleActive && permissionGranted
         stateMachine.setEnabled(shouldRun)
         if shouldRun {
             cameraManager.start()
