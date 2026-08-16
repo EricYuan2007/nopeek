@@ -94,7 +94,7 @@ final class StatusBarController {
         button.alphaValue = 1.0
 
         let symbolName: String
-        let tint: NSColor?
+        let tint: NSColor
         switch newIndicator {
         case .safe:
             symbolName = "eye.fill"; tint = .systemGreen
@@ -105,8 +105,7 @@ final class StatusBarController {
         case .paused, .off, .noPermission:
             symbolName = "eye.slash.fill"; tint = .systemGray
         }
-        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "NoPeek")
-        button.contentTintColor = tint
+        button.image = Self.coloredSymbol(symbolName, tint: tint)
         permissionItem.isHidden = (newIndicator != .noPermission)
 
         if newIndicator == .alert {
@@ -116,6 +115,24 @@ final class StatusBarController {
             RunLoop.main.add(timer, forMode: .common)
             pulseTimer = timer
         }
+    }
+
+    /// Pre-rendered colored symbol (NON-template). `contentTintColor` on a status
+    /// button is silently ignored for symbol images on recent macOS — drawing the
+    /// tint in ourselves is the only reliable way to get a colored menu-bar icon.
+    private static func coloredSymbol(_ name: String, tint: NSColor) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: "NoPeek")?
+            .withSymbolConfiguration(config) else { return nil }
+        let size = symbol.size
+        let image = NSImage(size: size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            tint.set()
+            rect.fill(using: .sourceAtop) // repaint the glyph's pixels, keep its alpha
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     private func pulseStep() {

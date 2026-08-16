@@ -453,11 +453,14 @@ private final class BubbleView: NSView {
         ringLayer.frame = bounds
         layer?.addSublayer(ringLayer)
 
-        // Subtle drop shadow (window shadow is square — wrong for a circle).
+        // Subtle drop shadow. Without an explicit shadowPath the empty backing layer
+        // casts a SQUARE shadow (a visible rectangular halo around the circle) —
+        // pin it to the circle's outline instead.
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.25
         layer?.shadowRadius = 6
         layer?.shadowOffset = .zero
+        layer?.shadowPath = CGPath(ellipseIn: bounds.insetBy(dx: 1.5, dy: 1.5), transform: nil)
 
         let eye = NSImageView(image: NSImage(systemSymbolName: "eye.fill", accessibilityDescription: nil) ?? NSImage())
         let symbolSize: CGFloat = 22
