@@ -11,7 +11,9 @@ import AppKit
 final class PrivacyBlurController {
 
     enum Source: String {
-        case auto, manual
+        case auto          // intruder alert
+        case manual        // ⌥⌘B
+        case ownerAbsent   // 机主离开保护
     }
 
     private var windows: [NSWindow] = []

@@ -60,6 +60,17 @@ final class AlertManager: NSObject {
         Log.alert.info("manual blur=\(self.manualBlurActive)")
     }
 
+    // MARK: - Owner-absence protection (人一走就模糊)
+
+    /// Independent shield source — never interferes with auto/manual shields.
+    func setOwnerAbsentBlur(_ active: Bool) {
+        if active {
+            blurController.show(source: .ownerAbsent)
+        } else {
+            blurController.hide(source: .ownerAbsent)
+        }
+    }
+
     // MARK: - Sound
 
     private func playSound() {

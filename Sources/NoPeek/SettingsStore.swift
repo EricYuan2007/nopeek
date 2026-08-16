@@ -29,6 +29,8 @@ final class SettingsStore: ObservableObject {
         static let bubblePinned = "bubblePinned"
         static let bubbleX = "bubbleX"
         static let bubbleY = "bubbleY"
+        static let ownerAbsentBlurEnabled = "ownerAbsentBlurEnabled"
+        static let ownerAbsentDelaySeconds = "ownerAbsentDelaySeconds"
     }
 
     // MARK: - Monitoring
@@ -51,6 +53,15 @@ final class SettingsStore: ObservableObject {
     @Published var alertNotification = true { didSet { persist(Key.alertNotification, alertNotification) } }
     /// 0 = single ping per episode; >0 = repeat every N seconds while alerting.
     @Published var soundRepeatSeconds = 0.0 { didSet { persist(Key.soundRepeatSeconds, soundRepeatSeconds) } }
+
+    // MARK: - Owner-absence protection (人一走就模糊)
+
+    /// Blur the whole screen when no owner face has been seen for a while.
+    /// V1: "owner" = largest face, so this fires when the camera sees nobody.
+    /// V2 (with enrollment): fires when the enrolled owner isn't in view.
+    @Published var ownerAbsentBlurEnabled = false { didSet { persist(Key.ownerAbsentBlurEnabled, ownerAbsentBlurEnabled) } }
+    /// Seconds without an owner face before the shield goes up.
+    @Published var ownerAbsentDelaySeconds = 5.0 { didSet { persist(Key.ownerAbsentDelaySeconds, ownerAbsentDelaySeconds) } }
 
     // MARK: - Floating bubble (M5)
 
@@ -76,6 +87,8 @@ final class SettingsStore: ObservableObject {
             Key.bubblePinned: false,
             Key.bubbleX: Double.nan,
             Key.bubbleY: Double.nan,
+            Key.ownerAbsentBlurEnabled: false,
+            Key.ownerAbsentDelaySeconds: 5.0,
         ])
         monitoringEnabled = defaults.bool(forKey: Key.monitoringEnabled)
         alertVisual = defaults.bool(forKey: Key.alertVisual)
@@ -91,6 +104,8 @@ final class SettingsStore: ObservableObject {
         bubblePinned = defaults.bool(forKey: Key.bubblePinned)
         bubbleX = defaults.double(forKey: Key.bubbleX)
         bubbleY = defaults.double(forKey: Key.bubbleY)
+        ownerAbsentBlurEnabled = defaults.bool(forKey: Key.ownerAbsentBlurEnabled)
+        ownerAbsentDelaySeconds = defaults.double(forKey: Key.ownerAbsentDelaySeconds)
     }
 
     private func persist(_ key: String, _ value: Any) {

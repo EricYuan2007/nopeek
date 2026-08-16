@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Carbon.HIToolbox
+import QuartzCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -22,6 +23,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastFaceCount = 0
     /// For the once-per-second detection summary log.
     private var observationCount = 0
+    /// Owner-absence protection bookkeeping. Timestamps share the host-time base
+    /// (capture PTS == CACurrentMediaTime epoch).
+    private var lastOwnerSeenAt: TimeInterval?
+    private var cameraStartedAt: TimeInterval?
+    private var ownerAbsentBlurActive = false
+    private var absenceTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.app.info("NoPeek launched")
@@ -74,6 +81,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         registerLifecycleObservers()
 
+        // Owner-absence check, once per second (guard conditions inside).
+        let absenceTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkOwnerAbsence() }
+        }
+        RunLoop.main.add(absenceTimer, forMode: .common)
+        self.absenceTimer = absenceTimer
+
         // First run (or camera still denied): explain before asking for the camera.
         let hasOnboarded = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
         let cameraDenied = AVCaptureDevice.authorizationStatus(for: .video) == .denied
@@ -121,6 +135,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                  config: Self.makeConfig(from: settings))
         stateMachine.handle(assessment, at: observation.timestamp)
 
+        // Owner-absence tracking: owner seen → remember + drop the absence shield.
+        if assessment.owner != nil {
+            lastOwnerSeenAt = observation.timestamp
+            if ownerAbsentBlurActive { clearOwnerAbsentBlur() }
+        }
+
         observationCount += 1
         if observationCount % 10 == 0 {
             let summary = observation.faces.map { face in
@@ -152,9 +172,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleCameraState(_ state: CameraManager.State) {
         if state == .running {
             stateMachine.notifyCameraRunning()
+            cameraStartedAt = CACurrentMediaTime()
+            lastOwnerSeenAt = nil
         }
         floatingBubble.setCameraRunning(state == .running)
         refreshUI()
+    }
+
+    // MARK: - Owner-absence protection (人一走就模糊)
+
+    private func checkOwnerAbsence() {
+        let monitoringLive = permissionGranted && settings.monitoringEnabled && lifecycleActive
+            && stateMachine.state != .off && stateMachine.state != .starting
+        guard settings.ownerAbsentBlurEnabled, monitoringLive else {
+            if ownerAbsentBlurActive { clearOwnerAbsentBlur() }
+            return
+        }
+        let now = CACurrentMediaTime()
+        // Never-seen-owner counts from camera start (grace period covers startup).
+        let reference = lastOwnerSeenAt ?? cameraStartedAt ?? now
+        let absentFor = now - reference
+        guard absentFor >= settings.ownerAbsentDelaySeconds else { return }
+        guard !ownerAbsentBlurActive else { return }
+        ownerAbsentBlurActive = true
+        alertManager.setOwnerAbsentBlur(true)
+        Log.alert.info("owner-absent shield ON (no owner for \(String(format: "%.1f", absentFor), privacy: .public)s)")
+    }
+
+    private func clearOwnerAbsentBlur() {
+        ownerAbsentBlurActive = false
+        alertManager.setOwnerAbsentBlur(false)
+        Log.alert.info("owner-absent shield OFF")
     }
 
     // MARK: - UI refresh

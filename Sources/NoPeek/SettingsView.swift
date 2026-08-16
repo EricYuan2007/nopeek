@@ -13,6 +13,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 monitoringSection
+                absenceSection
                 alertsSection
                 bubbleSection
                 permissionSection
@@ -44,6 +45,26 @@ struct SettingsView: View {
                 Toggle("低功耗模式（6 fps 分析）", isOn: $settings.ecoMode)
                 Toggle("严格朝向模式", isOn: $settings.strictPoseMode)
                 Toggle("抑制静止人脸（海报/照片）", isOn: $settings.suppressStaticFaces)
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    private var absenceSection: some View {
+        GroupBox("离开保护") {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("机主离开时自动模糊屏幕", isOn: $settings.ownerAbsentBlurEnabled)
+                HStack {
+                    Text("离开多久后触发")
+                    Spacer()
+                    Text("\(Int(settings.ownerAbsentDelaySeconds)) 秒")
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $settings.ownerAbsentDelaySeconds, in: 3...30, step: 1)
+                    .disabled(!settings.ownerAbsentBlurEnabled)
+                Text("人回来自动恢复。录入机主人脸后识别更精准（设置底部的「机主识别」）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding(.vertical, 6)
         }
