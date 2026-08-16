@@ -23,7 +23,7 @@ CERT_NAME     ?= NoPeek Dev
 SOURCES := $(shell find Sources -name '*.swift' | sort)
 BINARY  := $(BUILD_DIR)/$(APP_NAME)
 
-.PHONY: all bundle run clean cert adhoc log test reset-permissions
+.PHONY: all bundle run clean cert adhoc log test reset-permissions icon
 all: bundle
 
 $(BINARY): $(SOURCES) Makefile
@@ -35,9 +35,16 @@ bundle: $(BINARY)
 	@mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources"
 	cp Resources/Info.plist "$(APP_DIR)/Contents/Info.plist"
 	cp $(BINARY) "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"
+	cp Resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/"
 	@test -f Resources/alert.aiff && cp Resources/alert.aiff "$(APP_DIR)/Contents/Resources/" || true
 	codesign --force --sign "$(CERT_NAME)" --identifier $(BUNDLE_ID) --timestamp=none "$(APP_DIR)"
 	@echo "Built $(APP_DIR)"
+
+# Regenerate the app icon (vector-drawn by the script — no asset dependencies).
+# The .icns is committed, so this is only needed after changing the design.
+icon:
+	swift scripts/make-icon.swift $(BUILD_DIR)/AppIcon.iconset
+	iconutil -c icns $(BUILD_DIR)/AppIcon.iconset -o Resources/AppIcon.icns
 
 # Ad-hoc signed build. WARNING: the designated requirement embeds the cdhash, which changes
 # every recompile — macOS TCC will ask for camera permission again after every build.
