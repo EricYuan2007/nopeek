@@ -65,7 +65,7 @@ final class FloatingPanelController {
         case .alert: color = .systemRed
         case .paused, .off, .noPermission: color = .systemGray
         }
-        bubbleView?.setStateColor(color)
+        bubbleView?.setState(color, pulsing: indicator == .alert)
         cardTitle?.stringValue = titleForIndicator()
     }
 
@@ -123,7 +123,7 @@ final class FloatingPanelController {
         bubble.onHoverChange = { [weak self] hovering in self?.didHover(hovering) }
         container.addSubview(bubble)
         bubbleView = bubble
-        bubble.setStateColor(.systemGray)
+        bubble.setState(.systemGray, pulsing: false)
 
         self.panel = panel
         setIndicator(indicator)
@@ -428,11 +428,13 @@ private final class BubbleView: NSView {
     var onHoverChange: ((Bool) -> Void)?
 
     private let ringLayer = CAShapeLayer()
+    private let eyeView: NSImageView
     private var dragStartMouse: NSPoint?
     private var windowOriginStart: NSPoint?
     private var dragging = false
 
     override init(frame frameRect: NSRect) {
+        eyeView = NSImageView(image: NSImage(systemSymbolName: "eye.fill", accessibilityDescription: nil) ?? NSImage())
         super.init(frame: frameRect)
         wantsLayer = true
 
@@ -442,6 +444,14 @@ private final class BubbleView: NSView {
         effect.wantsLayer = true
         effect.layer?.cornerRadius = frameRect.width / 2
         effect.layer?.masksToBounds = true
+        // cornerRadius alone does NOT clip a visual-effect view's material on recent
+        // macOS (the blur kept rendering as a rectangle) — maskImage is the API
+        // designed for alpha-shaped clipping and actually works.
+        effect.maskImage = NSImage(size: bounds.size, flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            return true
+        }
         effect.autoresizingMask = [.width, .height]
         addSubview(effect)
 
@@ -449,7 +459,7 @@ private final class BubbleView: NSView {
         let inset: CGFloat = 2
         ringLayer.path = CGPath(ellipseIn: bounds.insetBy(dx: inset, dy: inset), transform: nil)
         ringLayer.fillColor = nil
-        ringLayer.lineWidth = 3
+        ringLayer.lineWidth = 3.5
         ringLayer.frame = bounds
         layer?.addSublayer(ringLayer)
 
@@ -462,20 +472,33 @@ private final class BubbleView: NSView {
         layer?.shadowOffset = .zero
         layer?.shadowPath = CGPath(ellipseIn: bounds.insetBy(dx: 1.5, dy: 1.5), transform: nil)
 
-        let eye = NSImageView(image: NSImage(systemSymbolName: "eye.fill", accessibilityDescription: nil) ?? NSImage())
         let symbolSize: CGFloat = 22
-        eye.frame = NSRect(x: (frameRect.width - symbolSize) / 2, y: (frameRect.height - symbolSize) / 2,
-                           width: symbolSize, height: symbolSize)
-        eye.contentTintColor = .white
-        eye.imageScaling = .scaleProportionallyUpOrDown
-        addSubview(eye)
+        eyeView.frame = NSRect(x: (frameRect.width - symbolSize) / 2, y: (frameRect.height - symbolSize) / 2,
+                               width: symbolSize, height: symbolSize)
+        eyeView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(eyeView)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func setStateColor(_ color: NSColor) {
+    /// State color drives BOTH the ring and the eye glyph (menu-bar parity);
+    /// alert additionally pulses the ring at ~1 Hz like the status item.
+    func setState(_ color: NSColor, pulsing: Bool) {
         ringLayer.strokeColor = color.cgColor
+        eyeView.contentTintColor = color
+        if pulsing, ringLayer.animation(forKey: "pulse") == nil {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1.0
+            pulse.toValue = 0.3
+            pulse.duration = 0.5
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            ringLayer.add(pulse, forKey: "pulse")
+        } else if !pulsing {
+            ringLayer.removeAnimation(forKey: "pulse")
+            ringLayer.opacity = 1
+        }
     }
 
     override func updateTrackingAreas() {
