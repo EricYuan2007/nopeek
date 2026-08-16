@@ -2,9 +2,10 @@
 // NoPeek app icon generator — draws the icon programmatically (no asset deps) and
 // emits a full .iconset; `make icon` then runs iconutil to produce the .icns.
 //
-// Design: macOS squircle, blue→violet night gradient; the product's floating-bubble
-// ring (mint) around a stylized eye (the owner), with a small red "intruder" dot
-// riding the ring at 2 o'clock — the whole detection story in one glyph.
+// Design: macOS squircle, blue→violet night gradient; an abstract "privacy radar" —
+// mint concentric rings (the floating-bubble motif), a sweep wedge, a solid center
+// dot (you), and a red blip riding the outer ring at 2 o'clock (the intruder).
+// Deliberately no literal eyeball — v1's eye design read as uncanny.
 import AppKit
 
 let outDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "build/AppIcon.iconset"
@@ -16,11 +17,16 @@ func rgb(_ hex: UInt32) -> NSColor {
             alpha: 1)
 }
 
+func circle(_ center: NSPoint, _ r: CGFloat) -> NSBezierPath {
+    NSBezierPath(ovalIn: NSRect(x: center.x - r, y: center.y - r, width: 2 * r, height: 2 * r))
+}
+
 func drawIcon(size s: CGFloat) -> NSImage {
     NSImage(size: NSSize(width: s, height: s), flipped: false) { _ in
         let inset = 0.055 * s
         let iconRect = NSRect(x: inset, y: inset, width: s - 2 * inset, height: s - 2 * inset)
         let center = NSPoint(x: s / 2, y: s / 2)
+        let mint = rgb(0x3DDC97)
 
         // Squircle-ish background (continuous-corner look via large radius).
         let squircle = NSBezierPath(roundedRect: iconRect, xRadius: 0.24 * iconRect.width,
@@ -36,55 +42,49 @@ func drawIcon(size s: CGFloat) -> NSImage {
                                    xRadius: 0.24 * iconRect.width, yRadius: 0.24 * iconRect.width),
                   angle: -90)
 
-        // Bubble ring (state ring from the floating bubble).
-        let ringRadius = 0.30 * s
-        let mint = rgb(0x3DDC97)
+        squircle.addClip()
+
+        // Outer ring — the bubble's state ring.
+        let outerR = 0.30 * s
         mint.setStroke()
-        let ring = NSBezierPath(ovalIn: NSRect(x: center.x - ringRadius, y: center.y - ringRadius,
-                                               width: ringRadius * 2, height: ringRadius * 2))
-        ring.lineWidth = 0.045 * s
-        ring.stroke()
+        let outer = circle(center, outerR)
+        outer.lineWidth = 0.045 * s
+        outer.stroke()
 
-        // Eye: symmetric almond via two quadratic arcs.
-        let eyeW = 0.46 * s
-        let eyeH = 0.26 * s
-        let eye = NSBezierPath()
-        eye.move(to: NSPoint(x: center.x - eyeW / 2, y: center.y))
-        eye.curve(to: NSPoint(x: center.x + eyeW / 2, y: center.y),
-                  controlPoint: NSPoint(x: center.x, y: center.y + eyeH))
-        eye.curve(to: NSPoint(x: center.x - eyeW / 2, y: center.y),
-                  controlPoint: NSPoint(x: center.x, y: center.y - eyeH))
-        eye.close()
-        NSColor.white.withAlphaComponent(0.96).setFill()
-        eye.fill()
+        // Inner ring, whisper-thin.
+        let innerR = 0.165 * s
+        mint.withAlphaComponent(0.55).setStroke()
+        let inner = circle(center, innerR)
+        inner.lineWidth = 0.018 * s
+        inner.stroke()
 
-        // Iris + pupil + highlight.
-        let irisR = 0.088 * s
+        // Radar sweep wedge: 75° pie fading clockwise from 2 o'clock.
+        let sweep = NSBezierPath()
+        sweep.move(to: center)
+        sweep.appendArc(withCenter: center, radius: outerR,
+                        startAngle: 45, endAngle: -30, clockwise: true)
+        sweep.close()
+        NSGradient(colors: [mint.withAlphaComponent(0.45), mint.withAlphaComponent(0.0)],
+                   atLocations: [0, 1], colorSpace: .deviceRGB)?
+            .draw(in: sweep, relativeCenterPosition: NSPoint(x: 0.5, y: 0.5))
+
+        // Center dot — you, anchored.
         mint.setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - irisR, y: center.y - irisR,
-                                    width: irisR * 2, height: irisR * 2)).fill()
-        let pupilR = 0.045 * s
-        rgb(0x101827).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - pupilR, y: center.y - pupilR,
-                                    width: pupilR * 2, height: pupilR * 2)).fill()
-        let hiR = 0.016 * s
-        NSColor.white.withAlphaComponent(0.9).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x + 0.03 * s - hiR, y: center.y + 0.035 * s - hiR,
-                                    width: hiR * 2, height: hiR * 2)).fill()
+        circle(center, 0.055 * s).fill()
+        NSColor.white.withAlphaComponent(0.85).setFill()
+        circle(center, 0.022 * s).fill()
 
-        // Intruder dot riding the ring at ~2 o'clock.
-        let dotR = 0.058 * s
+        // Intruder blip riding the outer ring at 2 o'clock.
+        let blipR = 0.056 * s
         let angle = CGFloat.pi / 4
-        let dotCenter = NSPoint(x: center.x + cos(angle) * ringRadius,
-                                y: center.y + sin(angle) * ringRadius)
-        let dotRect = NSRect(x: dotCenter.x - dotR, y: dotCenter.y - dotR,
-                             width: dotR * 2, height: dotR * 2)
-        NSColor.white.setStroke()
-        let dot = NSBezierPath(ovalIn: dotRect)
-        dot.lineWidth = 0.018 * s
+        let blipCenter = NSPoint(x: center.x + cos(angle) * outerR,
+                                 y: center.y + sin(angle) * outerR)
+        let blip = circle(blipCenter, blipR)
         rgb(0xFF453A).setFill()
-        dot.fill()
-        dot.stroke()
+        blip.fill()
+        NSColor.white.setStroke()
+        blip.lineWidth = 0.018 * s
+        blip.stroke()
         return true
     }
 }
@@ -109,3 +109,4 @@ for (name, size) in sizes {
     try png.write(to: URL(fileURLWithPath: "\(outDir)/\(name)"))
 }
 print("iconset written to \(outDir)")
+

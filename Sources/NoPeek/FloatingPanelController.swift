@@ -18,11 +18,13 @@ final class FloatingPanelController {
     }
 
     private enum Edge { case left, right, top, bottom }
-    private enum DockState: Equatable { case floating, docked(Edge), sliver(Edge) }
+    private enum DockState: Equatable { case floating, docked(Edge) }
 
     private static let bubbleSize: CGFloat = 52
-    private static let dockedVisible: CGFloat = 12
-    private static let sliverVisible: CGFloat = 6
+    /// Docked at an edge this much stays visible — a proper readable "tab" with the
+    /// state ring edge showing. (The old 6 pt sliver was effectively invisible —
+    /// users lost the bubble entirely.)
+    private static let dockedVisible: CGFloat = 20
     private static let edgeSnapDistance: CGFloat = 28
     private static let expandedSize = NSSize(width: 300, height: 230)
 
@@ -42,7 +44,6 @@ final class FloatingPanelController {
     private var indicator: StatusBarController.Indicator = .off
     private var cameraRunning = false
 
-    private var idleTimer: Timer?
     private var collapseTimer: Timer?
     private var outsideClickMonitor: Any?
 
@@ -153,9 +154,8 @@ final class FloatingPanelController {
 
     private func didDragStart() {
         guard let panel, dockState != .floating else { return }
-        // Pop back to full size so the drag grabs a fully-visible bubble.
+        // Pop back to full size so the drag grabs a fully-visible chip.
         let edge = currentEdge()
-        idleTimer?.invalidate()
         moveToEdge(edge, visible: Self.bubbleSize, animated: false)
         dockState = .floating
         _ = panel
@@ -183,47 +183,21 @@ final class FloatingPanelController {
 
     private func currentEdge() -> Edge {
         switch dockState {
-        case .floating: return .right // unused — only called when docked/sliver
-        case .docked(let edge), .sliver(let edge): return edge
+        case .floating: return .right // unused — only called when docked
+        case .docked(let edge): return edge
         }
     }
 
     private func dock(to edge: Edge) {
         dockState = .docked(edge)
         moveToEdge(edge, visible: Self.dockedVisible, animated: true)
-        // Shrink to a sliver after 3 s idle.
-        let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, case .docked(let edge) = self.dockState else { return }
-                self.dockState = .sliver(edge)
-                self.moveToEdge(edge, visible: Self.sliverVisible, animated: true)
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        idleTimer = timer
     }
 
     private func didHover(_ hovering: Bool) {
         guard !settings.bubblePinned || hovering else { return }
-        if hovering {
-            idleTimer?.invalidate()
-            switch dockState {
-            case .docked(let edge), .sliver(let edge):
-                moveToEdge(edge, visible: Self.bubbleSize, animated: true)
-            case .floating:
-                break
-            }
-        } else {
-            switch dockState {
-            case .docked(let edge):
-                moveToEdge(edge, visible: Self.dockedVisible, animated: true)
-                dock(to: edge) // re-arm the idle → sliver timer
-            case .sliver(let edge):
-                moveToEdge(edge, visible: Self.sliverVisible, animated: true)
-            case .floating:
-                break
-            }
-        }
+        guard case .docked(let edge) = dockState else { return }
+        // Hover slides the full chip out; leaving tucks it back to the tab.
+        moveToEdge(edge, visible: hovering ? Self.bubbleSize : Self.dockedVisible, animated: true)
     }
 
     /// Positions the panel so `visible` points of it peek out from `edge` of its screen.
@@ -284,8 +258,6 @@ final class FloatingPanelController {
     private func expand() {
         guard let panel, !expanded else { return }
         expanded = true
-        idleTimer?.invalidate()
-
         buildCardIfNeeded()
         cardView?.isHidden = false
         bubbleView?.isHidden = true
@@ -341,17 +313,15 @@ final class FloatingPanelController {
     private func buildCardIfNeeded() {
         guard cardView == nil, let panel, let container = panel.contentView else { return }
 
-        let card = NSView(frame: NSRect(origin: .zero, size: Self.expandedSize))
+        // Solid self-drawn card — no NSVisualEffectView anywhere (its private blur
+        // material ignores corner clipping on macOS 26, showing直角模糊边).
+        // A plain layer's cornerRadius + masksToBounds clips children correctly.
+        let card = CardContainerView(frame: NSRect(origin: .zero, size: Self.expandedSize))
         card.wantsLayer = true
         card.isHidden = true
-
-        let effect = NSVisualEffectView(frame: card.bounds)
-        effect.material = .popover
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 14
-        effect.layer?.masksToBounds = true
-        card.addSubview(effect)
+        card.layer?.cornerRadius = 14
+        card.layer?.masksToBounds = true
+        card.updateFill()
 
         // Live preview (user-invoked only — the app's standing promise is no preview
         // on screen unless the user explicitly opens it).
@@ -374,14 +344,14 @@ final class FloatingPanelController {
         paused.isHidden = cameraRunning
         previewContainer.addSubview(paused)
         pausedOverlay = paused
-        effect.addSubview(previewContainer)
+        card.addSubview(previewContainer)
 
         let title = NSTextField(labelWithString: titleForIndicator())
         title.font = .systemFont(ofSize: 13, weight: .semibold)
         title.alignment = .center
         title.frame = NSRect(x: 0, y: Self.expandedSize.height - previewHeight - 28,
                              width: Self.expandedSize.width, height: 20)
-        effect.addSubview(title)
+        card.addSubview(title)
         cardTitle = title
 
         let buttonRow = NSStackView()
@@ -398,7 +368,7 @@ final class FloatingPanelController {
             $0.font = .systemFont(ofSize: 12)
             buttonRow.addArrangedSubview($0)
         }
-        effect.addSubview(buttonRow)
+        card.addSubview(buttonRow)
 
         container.addSubview(card)
         card.frame = container.bounds
@@ -411,6 +381,21 @@ final class FloatingPanelController {
     @objc private func handleSettingsButton() {
         collapse()
         actions.onOpenSettings()
+    }
+}
+
+// MARK: - CardContainerView
+
+/// Expanded-card background: solid rounded rect (plain layers clip children
+/// correctly — unlike NSVisualEffectView's private blur material).
+private final class CardContainerView: NSView {
+    func updateFill() {
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        layer?.backgroundColor = NSColor(white: dark ? 0.13 : 0.97, alpha: 0.98).cgColor
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateFill()
     }
 }
 
