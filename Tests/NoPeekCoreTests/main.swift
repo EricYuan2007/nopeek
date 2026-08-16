@@ -1,12 +1,24 @@
 import Foundation
 
-// M0 smoke test — real NoPeekCore tests (state machine, intruder assessment) land in M3.
-func testCorePlaceholder() {
-    expectEqual(NoPeekCore.version, "0.1.0")
-}
-
+// Test functions are plain top-level funcs, enumerated here explicitly.
+// (XCTest is unavailable without full Xcode — this runner replaces it.)
 let suites: [(String, () -> Void)] = [
-    ("core placeholder", testCorePlaceholder),
+    // FaceTracker
+    ("tracker stable ids", testTrackerAssignsStableIDs),
+    ("tracker new face new id", testTrackerNewFaceGetsNewID),
+    ("tracker flags static faces", testTrackerFlagsStaticFaces),
+    ("tracker ignores real-head jitter", testTrackerDoesNotFlagRealHeads),
+    ("tracker prunes stale tracks", testTrackerPrunesStaleTracks),
+    ("IoU math", testIoU),
+    // IntruderAssessor
+    ("single face is owner", testAssessorSingleFaceIsOwner),
+    ("second face is intruder", testAssessorSecondFaceIsIntruder),
+    ("distance gate", testAssessorDistanceGate),
+    ("pose gate", testAssessorPoseGate),
+    ("unknown pose policy", testAssessorUnknownPoseCountsAsFacing),
+    ("quality gate", testAssessorQualityGate),
+    ("static suppression", testAssessorStaticSuppression),
+    ("owner never static-suppressed", testAssessorOwnerNeverStaticSuppressed),
 ]
 
 for (name, body) in suites {

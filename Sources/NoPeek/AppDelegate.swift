@@ -4,11 +4,15 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let cameraManager = CameraManager()
+    private let faceAnalyzer = FaceAnalyzer()
+    private let debugOverlay = DebugOverlayController()
 
     /// Whether monitoring is desired by the user (M4: driven by SettingsStore).
     private var monitoringWanted = true
     /// Whether the camera is currently allowed to run (not locked / not asleep).
     private var lifecycleActive = true
+    /// For the once-per-second detection summary log.
+    private var observationCount = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.app.info("NoPeek launched")
@@ -21,17 +25,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "NoPeek 运行中", action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "调试浮层", action: #selector(toggleDebugOverlay), keyEquivalent: "d"))
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出 NoPeek",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
         statusItem.menu = menu
 
-        cameraManager.onFrame = { _, _ in
-            // M2 hooks FaceAnalyzer here.
+        // Camera frames (camera queue) → Vision analysis (same queue) → observations
+        // hop to MainActor for UI/state.
+        cameraManager.onFrame = { [faceAnalyzer] buffer, timestamp in
+            faceAnalyzer.analyze(buffer, timestamp: timestamp)
+        }
+        faceAnalyzer.onObservation = { [weak self] observation in
+            DispatchQueue.main.async { self?.handle(observation) }
+        }
+        cameraManager.onStateChange = { state in
+            Log.camera.info("camera state → \(state.rawValue)")
         }
 
         registerLifecycleObservers()
         requestCameraAndStart()
+    }
+
+    // MARK: - Per-frame observation (MainActor)
+
+    private func handle(_ observation: FrameObservation) {
+        debugOverlay.update(observation)
+
+        observationCount += 1
+        if observationCount % 10 == 0 {
+            let summary = observation.faces.map { face in
+                let yaw = face.yawRad.map { String(format: "%.0f°", $0 * 180 / .pi) } ?? "?"
+                return "#\(face.trackID)(a=\(String(format: "%.4f", face.area)),yaw=\(yaw),q=\(String(format: "%.2f", face.quality))\(face.isStaticSuspect ? ",S" : ""))"
+            }.joined(separator: " ")
+            // Geometry only (areas/angles/quality) — never image data. Public so the
+            // numbers are visible for threshold calibration with `make log`.
+            Log.detection.debug("faces=\(observation.faces.count) \(summary, privacy: .public)")
+        }
+    }
+
+    @objc private func toggleDebugOverlay() {
+        debugOverlay.toggle(session: cameraManager.captureSession)
     }
 
     // MARK: - Camera bring-up
