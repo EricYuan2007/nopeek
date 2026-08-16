@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+.build/
+*.app
+*.o
+*.swiftmodule
+
+# macOS noise
+.DS_Store
+
+# Signing material — NEVER commit private keys
+certs/
+*.p12
+*.pem
+*.key
+
+# CoreML compiled artifacts (V2)
+Resources/*.mlmodelc
+
+# Editor
+*.swp
+.idea/
+.vscode/
