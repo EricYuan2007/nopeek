@@ -40,17 +40,27 @@ func testMachineBootsToMonitoring() {
 func testMachineFlickerNeverAlerts() {
     let log = TransitionLog()
     let machine = bootedMachine(log)
-    // Isolated 1–2 frame blips must never reach alert (enterFrames = 3).
-    feed(machine, [true, false, true, true, false, true, false, true, true, false])
+    // Sparse blips (≤40% duty cycle): the leaky bucket drains between them,
+    // so the score oscillates near zero and never reaches enterFrames = 3.
+    feed(machine, [true, false, false, true, true, false, false, true, false, false])
     expect(!log.states.contains(.alert), "flicker must not alert — got \(log.states.map(\.rawValue))")
     expectEqual(machine.state, .monitoring)
+}
+
+func testMachineToleratesSingleDropout() {
+    let log = TransitionLog()
+    let machine = bootedMachine(log)
+    // Sustained intruder with ONE dropped detection mid-sequence. Strict 3-consecutive
+    // would reset and need 6 frames; the leaky bucket (＋1/−1) confirms in 5.
+    feed(machine, [true, true, false, true, true])
+    expectEqual(machine.state, .alert, "dropout-tolerant entry — got \(log.states.map(\.rawValue))")
 }
 
 func testMachineSustainedIntruderAlerts() {
     let log = TransitionLog()
     let machine = bootedMachine(log)
     feed(machine, [true, true, true])
-    expectEqual(machine.state, .alert, "3 consecutive intruder frames → alert (~0.3 s)")
+    expectEqual(machine.state, .alert, "3 consecutive intruder frames → alert (~0.2 s at burst rate)")
 }
 
 func testMachineSlowExitPreventsFlapping() {

@@ -15,6 +15,10 @@ public final class FaceTracker {
         var box: CGRect
         var lastSeen: TimeInterval
         var history: [(center: CGPoint, area: CGFloat, t: TimeInterval)]
+        /// EMA-smoothed pose — raw per-frame yaw/pitch jitter can flap the ±35°/±30°
+        /// intruder gates on a perfectly still head.
+        var yawRad: CGFloat?
+        var pitchRad: CGFloat?
     }
 
     public var staticMinAge: TimeInterval = 4
@@ -59,7 +63,8 @@ public final class FaceTracker {
             if let ti = faceToTrack[fi] {
                 trackIndex = ti
             } else {
-                tracks.append(Track(id: nextID, box: face.boundingBox, lastSeen: timestamp, history: []))
+                tracks.append(Track(id: nextID, box: face.boundingBox, lastSeen: timestamp,
+                                    history: [], yawRad: nil, pitchRad: nil))
                 nextID += 1
                 trackIndex = tracks.count - 1
             }
@@ -73,6 +78,16 @@ public final class FaceTracker {
                 width: tracks[trackIndex].box.width * (1 - α) + face.boundingBox.width * α,
                 height: tracks[trackIndex].box.height * (1 - α) + face.boundingBox.height * α
             )
+            // Same EMA for pose; a missing read holds the track's last known pose
+            // (bounded by the 2 s track liveness window).
+            if let yaw = face.yawRad {
+                tracks[trackIndex].yawRad = tracks[trackIndex].yawRad.map { $0 * 0.5 + yaw * 0.5 } ?? yaw
+            }
+            if let pitch = face.pitchRad {
+                tracks[trackIndex].pitchRad = tracks[trackIndex].pitchRad.map { $0 * 0.5 + pitch * 0.5 } ?? pitch
+            }
+            face.yawRad = tracks[trackIndex].yawRad ?? face.yawRad
+            face.pitchRad = tracks[trackIndex].pitchRad ?? face.pitchRad
             tracks[trackIndex].lastSeen = timestamp
             tracks[trackIndex].history.append((center, face.area, timestamp))
             tracks[trackIndex].history.removeAll { timestamp - $0.t > historyWindow }

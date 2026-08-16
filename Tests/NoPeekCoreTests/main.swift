@@ -32,6 +32,7 @@ let suites: [(String, () -> Void)] = [
     // DetectionStateMachine
     ("boots to monitoring", testMachineBootsToMonitoring),
     ("flicker never alerts", testMachineFlickerNeverAlerts),
+    ("dropout-tolerant entry", testMachineToleratesSingleDropout),
     ("sustained intruder alerts", testMachineSustainedIntruderAlerts),
     ("slow exit prevents flapping", testMachineSlowExitPreventsFlapping),
     ("cooldown fast retrigger", testMachineCooldownFastRetrigger),

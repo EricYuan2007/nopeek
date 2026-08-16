@@ -2,13 +2,17 @@ import Foundation
 
 /// Hysteresis state machine over per-frame intruder assessments.
 ///
-///     off → starting → monitoring ⇄ suspicious →(3 intruder frames)→ alert
+///     off → starting → monitoring ⇄ suspicious →(score ≥ 3)→ alert
 ///     alert →(12 clean frames)→ cooldown →(4 s quiet)→ monitoring
-///     cooldown →(2 intruder frames)→ alert   // fast re-trigger
+///     cooldown →(score ≥ 2)→ alert   // fast re-trigger
 ///
-/// Entering alert at ~0.3 s feels instant yet ignores single-frame flicker; the slow
-/// exit (~1.2 s) keeps brief occlusions from flapping the privacy shield; cooldown
-/// re-triggers fast when the peeker comes back.
+/// Entry uses a LEAKY BUCKET instead of a strict consecutive streak: a suspicious
+/// frame adds +1, a clean frame leaks −1 (floor 0). A sustained intruder still
+/// confirms in 3 frames (~0.2 s at burst rate), but one dropped detection mid-
+/// sequence no longer resets confirmation to zero (I,I,C,I,I alerts in 5 frames
+/// instead of 6) — while a 50%-duty-cycle flicker source oscillates 0↔1 and never
+/// alerts, exactly like the old design. The slow exit (~1.2 s) keeps brief
+/// occlusions from flapping the privacy shield; cooldown re-triggers fast.
 ///
 /// Not thread-safe by itself — confine to one queue (MainActor in the app, direct
 /// calls in tests).
@@ -21,7 +25,7 @@ public final class DetectionStateMachine: @unchecked Sendable {
     public var onTransition: ((_ from: DetectionState, _ to: DetectionState, _ trigger: Assessment?) -> Void)?
 
     private var config: DetectionConfig
-    private var intruderStreak = 0
+    private var suspicionScore: Double = 0
     private var cleanStreak = 0
     private var cooldownBegan: TimeInterval?
 
@@ -57,20 +61,22 @@ public final class DetectionStateMachine: @unchecked Sendable {
             break
         case .monitoring:
             if intruderPresent {
-                intruderStreak = 1
+                suspicionScore = 1
                 cleanStreak = 0
                 transition(to: .suspicious, trigger: assessment)
             }
         case .suspicious:
             if intruderPresent {
-                intruderStreak += 1
-                if intruderStreak >= config.enterFrames {
+                suspicionScore += 1
+                if suspicionScore >= Double(config.enterFrames) {
                     resetCounters()
                     transition(to: .alert, trigger: assessment)
                 }
             } else {
-                resetCounters()
-                transition(to: .monitoring, trigger: nil)
+                suspicionScore = max(0, suspicionScore - config.entryMissPenalty)
+                if suspicionScore == 0 {
+                    transition(to: .monitoring, trigger: nil)
+                }
             }
         case .alert:
             if intruderPresent {
@@ -85,14 +91,14 @@ public final class DetectionStateMachine: @unchecked Sendable {
             }
         case .cooldown:
             if intruderPresent {
-                intruderStreak += 1
+                suspicionScore += 1
                 cleanStreak = 0
-                if intruderStreak >= config.cooldownEnterFrames {
+                if suspicionScore >= Double(config.cooldownEnterFrames) {
                     resetCounters()
                     transition(to: .alert, trigger: assessment)
                 }
             } else {
-                intruderStreak = 0
+                suspicionScore = 0
                 if let began = cooldownBegan, timestamp - began >= config.cooldownSeconds {
                     transition(to: .monitoring, trigger: nil)
                 }
@@ -101,7 +107,7 @@ public final class DetectionStateMachine: @unchecked Sendable {
     }
 
     private func resetCounters() {
-        intruderStreak = 0
+        suspicionScore = 0
         cleanStreak = 0
     }
 

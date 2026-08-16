@@ -95,8 +95,11 @@ public struct DetectionConfig: Sendable, Equatable {
     /// Privacy tool bias: unknown pose counts as "facing" unless strict mode is on.
     public var requireKnownPose = false
     public var suppressStaticFaces = true
-    /// Hysteresis, in frames at ~10 fps.
-    public var enterFrames = 3        // suspicious → alert  (~0.3 s)
+    /// Hysteresis, in frames at ~10 fps (burst 15 fps when engaged).
+    public var enterFrames = 3        // suspicious → alert  (~0.2–0.3 s)
+    /// Leaky-bucket penalty per clean frame while suspicious — tolerates single
+    /// dropped detections without resetting confirmation, rejects 50% flicker.
+    public var entryMissPenalty: Double = 1
     public var exitFrames = 12        // alert → cooldown    (~1.2 s)
     public var cooldownEnterFrames = 2 // cooldown → alert fast re-trigger
     public var cooldownSeconds: TimeInterval = 4
