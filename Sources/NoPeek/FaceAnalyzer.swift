@@ -68,11 +68,19 @@ final class FaceAnalyzer: @unchecked Sendable {
     //      owner/stranger verdict only flips OUTSIDE a ±identityDeadband band
     //      around the nominal threshold; inside the band the previous verdict
     //      stands (first-time tracks fall back to the nominal comparison).
+    //   4. Occlusion guard — a hand / cup / mask crossing the owner's face makes
+    //      the raw distance spike by 0.2+ in a single frame. For an ESTABLISHED
+    //      track that jump is held (not fed into the EMA) for up to
+    //      identityOcclusionMaxHold frames; the hold is bounded so a genuine
+    //      same-spot person swap is still accepted after ~0.5 s.
     private var smoothedDistanceByTrack: [Int: Float] = [:]
     private var identityIsOwnerByTrack: [Int: Bool] = [:]
+    private var occlusionHoldByTrack: [Int: Int] = [:]
     private static let identityMaxYawRad: CGFloat = 0.52 // 30°
-    private static let identityMinQuality: Float = 0.25
+    private static let identityMinQuality: Float = 0.35
     private static let identityDeadband: Float = 0.10
+    private static let identityOcclusionJump: Float = 0.20
+    private static let identityOcclusionMaxHold = 5
 
     func analyze(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) {
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
@@ -156,25 +164,36 @@ final class FaceAnalyzer: @unchecked Sendable {
                         && face.quality >= Self.identityMinQuality
                     if poseReliable, let raw = face.ownerDistance {
                         let previous = smoothedDistanceByTrack[face.trackID]
-                        let smoothed = previous.map { $0 * 0.55 + raw * 0.45 } ?? raw
-                        smoothedDistanceByTrack[face.trackID] = smoothed
-                        face.ownerDistance = smoothed
-                        // Deadband verdict: only a decisive excursion flips identity.
-                        let nominal = ownerMaxDistance
-                        let verdict: Bool
-                        if smoothed <= nominal - Self.identityDeadband {
-                            verdict = true
-                        } else if smoothed >= nominal + Self.identityDeadband {
-                            verdict = false
-                        } else if let established = identityIsOwnerByTrack[face.trackID] {
-                            verdict = established
+                        let occluding = previous != nil
+                            && raw - previous! > Self.identityOcclusionJump
+                            && (occlusionHoldByTrack[face.trackID] ?? 0) < Self.identityOcclusionMaxHold
+                        if occluding {
+                            // Transient occlusion — hold, don't feed the spike to the EMA.
+                            occlusionHoldByTrack[face.trackID] = (occlusionHoldByTrack[face.trackID] ?? 0) + 1
+                            face.ownerDistance = previous
+                            face.isOwner = identityIsOwnerByTrack[face.trackID]
                         } else {
-                            verdict = smoothed <= nominal
+                            occlusionHoldByTrack[face.trackID] = 0
+                            let smoothed = previous.map { $0 * 0.55 + raw * 0.45 } ?? raw
+                            smoothedDistanceByTrack[face.trackID] = smoothed
+                            face.ownerDistance = smoothed
+                            // Deadband verdict: only a decisive excursion flips identity.
+                            let nominal = ownerMaxDistance
+                            let verdict: Bool
+                            if smoothed <= nominal - Self.identityDeadband {
+                                verdict = true
+                            } else if smoothed >= nominal + Self.identityDeadband {
+                                verdict = false
+                            } else if let established = identityIsOwnerByTrack[face.trackID] {
+                                verdict = established
+                            } else {
+                                verdict = smoothed <= nominal
+                            }
+                            identityIsOwnerByTrack[face.trackID] = verdict
+                            face.isOwner = verdict
                         }
-                        identityIsOwnerByTrack[face.trackID] = verdict
-                        face.isOwner = verdict
                     } else {
-                        // Unreliable read (turned/blurry) — hold the last known values.
+                        // Unreliable read (turned/blurry/occluded) — hold the last known values.
                         face.ownerDistance = smoothedDistanceByTrack[face.trackID]
                         face.isOwner = identityIsOwnerByTrack[face.trackID]
                     }
@@ -183,6 +202,7 @@ final class FaceAnalyzer: @unchecked Sendable {
                 let liveIDs = Set(tracked.map(\.trackID))
                 smoothedDistanceByTrack = smoothedDistanceByTrack.filter { liveIDs.contains($0.key) }
                 identityIsOwnerByTrack = identityIsOwnerByTrack.filter { liveIDs.contains($0.key) }
+                occlusionHoldByTrack = occlusionHoldByTrack.filter { liveIDs.contains($0.key) }
             }
 
             emit(FrameObservation(timestamp: timestamp, faces: tracked))
