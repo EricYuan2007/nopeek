@@ -416,8 +416,10 @@ final class FloatingPanelController {
 
 // MARK: - BubbleView
 
-/// The circular bubble: vibrancy disc + colored state ring + eye glyph.
-/// Handles its own mouse events (manual drag math, click, right-click, hover).
+/// The floating chip: rounded-square HUD tile (mini app-icon style) — translucent
+/// disc + colored state ring + eye glyph, all self-drawn CAShapeLayers so the shape
+/// renders exactly as designed. Handles its own mouse events (manual drag math,
+/// click, right-click, hover).
 @MainActor
 private final class BubbleView: NSView {
 
@@ -439,32 +441,36 @@ private final class BubbleView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
 
-        // Self-drawn translucent disc — NOT NSVisualEffectView: neither cornerRadius
-        // nor maskImage reliably clips that view's private material on recent macOS
-        // (the blur kept rendering as a rounded rect). A CAShapeLayer ellipse is
-        // circular BY CONSTRUCTION, so the rectangle can never come back. Alpha 0.92
-        // keeps a frosted feel against the wallpaper.
-        discLayer.path = CGPath(ellipseIn: bounds.insetBy(dx: 0.5, dy: 0.5), transform: nil)
+        // Self-drawn translucent chip — rounded-square by construction.
+        // (NSVisualEffectView's private material defeated both cornerRadius and
+        // maskImage clipping on macOS 26, so we draw the shape ourselves; alpha
+        // 0.92 keeps a frosted feel against the wallpaper.)
+        let radius: CGFloat = 14
+        discLayer.path = CGPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                cornerWidth: radius, cornerHeight: radius, transform: nil)
         discLayer.frame = bounds
         layer?.addSublayer(discLayer)
         updateDiscColor()
 
-        // State ring follows the circle edge.
+        // State ring follows the chip's edge.
         let inset: CGFloat = 2
-        ringLayer.path = CGPath(ellipseIn: bounds.insetBy(dx: inset, dy: inset), transform: nil)
+        ringLayer.path = CGPath(roundedRect: bounds.insetBy(dx: inset, dy: inset),
+                                cornerWidth: radius - inset, cornerHeight: radius - inset,
+                                transform: nil)
         ringLayer.fillColor = nil
         ringLayer.lineWidth = 3.5
         ringLayer.frame = bounds
         layer?.addSublayer(ringLayer)
 
-        // Subtle drop shadow. Without an explicit shadowPath the empty backing layer
-        // casts a SQUARE shadow (a visible rectangular halo around the circle) —
-        // pin it to the circle's outline instead.
+        // Subtle drop shadow pinned to the chip outline (an empty layer without an
+        // explicit shadowPath casts a hard square shadow).
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.25
         layer?.shadowRadius = 6
         layer?.shadowOffset = .zero
-        layer?.shadowPath = CGPath(ellipseIn: bounds.insetBy(dx: 1.5, dy: 1.5), transform: nil)
+        layer?.shadowPath = CGPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5),
+                                   cornerWidth: radius - 1.5, cornerHeight: radius - 1.5,
+                                   transform: nil)
 
         let symbolSize: CGFloat = 22
         eyeView.frame = NSRect(x: (frameRect.width - symbolSize) / 2, y: (frameRect.height - symbolSize) / 2,
