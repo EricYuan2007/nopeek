@@ -428,6 +428,7 @@ private final class BubbleView: NSView {
     var onHoverChange: ((Bool) -> Void)?
 
     private let ringLayer = CAShapeLayer()
+    private let discLayer = CAShapeLayer()
     private let eyeView: NSImageView
     private var dragStartMouse: NSPoint?
     private var windowOriginStart: NSPoint?
@@ -438,22 +439,15 @@ private final class BubbleView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
 
-        let effect = NSVisualEffectView(frame: bounds)
-        effect.material = .popover
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = frameRect.width / 2
-        effect.layer?.masksToBounds = true
-        // cornerRadius alone does NOT clip a visual-effect view's material on recent
-        // macOS (the blur kept rendering as a rectangle) — maskImage is the API
-        // designed for alpha-shaped clipping and actually works.
-        effect.maskImage = NSImage(size: bounds.size, flipped: false) { rect in
-            NSColor.black.setFill()
-            NSBezierPath(ovalIn: rect).fill()
-            return true
-        }
-        effect.autoresizingMask = [.width, .height]
-        addSubview(effect)
+        // Self-drawn translucent disc — NOT NSVisualEffectView: neither cornerRadius
+        // nor maskImage reliably clips that view's private material on recent macOS
+        // (the blur kept rendering as a rounded rect). A CAShapeLayer ellipse is
+        // circular BY CONSTRUCTION, so the rectangle can never come back. Alpha 0.92
+        // keeps a frosted feel against the wallpaper.
+        discLayer.path = CGPath(ellipseIn: bounds.insetBy(dx: 0.5, dy: 0.5), transform: nil)
+        discLayer.frame = bounds
+        layer?.addSublayer(discLayer)
+        updateDiscColor()
 
         // State ring follows the circle edge.
         let inset: CGFloat = 2
@@ -481,6 +475,17 @@ private final class BubbleView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Theme-adaptive disc: near-white in light mode, dark gray in dark mode.
+    private func updateDiscColor() {
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        discLayer.fillColor = NSColor(white: dark ? 0.17 : 0.97, alpha: 0.92).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateDiscColor()
+    }
 
     /// State color drives BOTH the ring and the eye glyph (menu-bar parity);
     /// alert additionally pulses the ring at ~1 Hz like the status item.
