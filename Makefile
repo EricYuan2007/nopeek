@@ -59,7 +59,7 @@ test:
 	./$(BUILD_DIR)/NoPeekCoreTests
 
 log:
-	log stream --predicate 'subsystem == "$(BUNDLE_ID)"' --info
+	/usr/bin/log stream --predicate 'subsystem == "$(BUNDLE_ID)"' --info --debug
 
 reset-permissions:
 	tccutil reset Camera $(BUNDLE_ID)
