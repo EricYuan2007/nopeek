@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsWindow = SettingsWindowController()
     private let settings = SettingsStore.shared
     private let hotKeys = GlobalHotKey()
+    private var floatingBubble: FloatingPanelController!
     private lazy var stateMachine = DetectionStateMachine(config: Self.makeConfig(from: settings))
 
     /// Whether the camera is currently allowed to run (not locked / not asleep).
@@ -51,6 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         settings.onChange = { [weak self] in self?.applySettings() }
 
+        floatingBubble = FloatingPanelController(actions: .init(
+            onTogglePause: { [weak self] in self?.togglePause() },
+            onToggleManualBlur: { [weak self] in self?.toggleManualBlur() },
+            onOpenSettings: { [weak self] in self?.settingsWindow.show() }
+        ))
+        floatingBubble.attach(session: cameraManager.captureSession)
+        floatingBubble.applyVisibility()
+
         // Global escape hatches — crucial when the shield frosts the whole screen.
         hotKeys.register([
             .init(keyCode: UInt32(kVK_ANSI_B), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
@@ -83,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applySettings() {
         stateMachine.updateConfig(Self.makeConfig(from: settings))
         cameraManager.analysisFPS = settings.ecoMode ? 6 : 10
+        floatingBubble.applyVisibility()
         updateCameraRunState()
     }
 
@@ -128,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state == .running {
             stateMachine.notifyCameraRunning()
         }
+        floatingBubble.setCameraRunning(state == .running)
         refreshUI()
     }
 
@@ -155,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar.setIndicator(indicator)
         statusBar.setPaused(!settings.monitoringEnabled)
         statusBar.setManualBlurActive(alertManager.manualBlurActive)
+        floatingBubble.setIndicator(indicator)
         refreshStatusLine()
     }
 
