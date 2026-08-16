@@ -1,103 +1,165 @@
-# NoPeek 👁️
+<p align="center">
+  <img src="docs/icon.png" width="128" alt="NoPeek icon">
+</p>
 
-<p><img src="docs/icon.png" width="128" alt="NoPeek icon"></p>
+<h1 align="center">NoPeek</h1>
 
-macOS 菜单栏应用：**当有人在你身后窥屏时，立刻提醒你**（并可选自动遮挡整个屏幕）。
+<p align="center">
+  <strong>A macOS menu-bar app that alerts you the moment someone peeks at your screen.</strong><br>
+  Real-time, on-device face detection with owner recognition — no network, no storage, no compromise.
+</p>
 
-纯 Swift 原生实现（AVFoundation + Vision），零第三方依赖，**全部画面只在本机实时分析，绝不存储、上传或联网**。不需要安装 Xcode —— 只需 Command Line Tools。
+<p align="center">
+  <a href="https://github.com/EricYuan2007/nopeek/releases"><img src="https://img.shields.io/github/v/release/EricYuan2007/nopeek" alt="Release"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-blue" alt="Platform: macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-6-orange" alt="Swift 6">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+</p>
 
-## 功能
-
-- **实时检测**：内置摄像头 @720p，Vision 人脸检测走神经网络引擎，约 10 fps 分析，CPU 占用极低
-- **机主识别（V2）**：设置页录入你的脸（Vision 特征印迹，8 个样本，Keychain 加密存储）——之后只对陌生人报警；机主不在场 + 陌生人出现 → 立即报警。身份判定带迟滞缓冲带，你自己的脸在阈值附近抖动不会误报
-- **离开保护**：人一走就模糊屏幕 —— 机主消失超过 N 秒（3–30s 可调），隐私盾自动升起；回来立即解除
-- **智能判定**：闯入者需同时满足 —— 足够近（能看清屏幕）、**头朝向屏幕**（yaw/pitch 姿态角）、非静止海报脸（微动检测）
-- **四种告警**（各自独立开关）：
-  - 🔴 视觉警报 —— 菜单栏图标变红 + 脉冲闪烁
-  - 🪟 全屏隐私盾 —— 毛玻璃瞬间盖住所有屏幕（点击穿透，不锁键盘），人走自动恢复
-  - 🔊 提示音
-  - 🔔 系统通知
-- **悬浮小窗**：圆角芯片，颜色即状态（绿/黄/红脉冲/灰）；可拖动、贴边自动收成可见标签、悬停展开、右键固定；单击展开实时预览卡片
-- **全局快捷键**（无需切到 App）：
-  - `⌥⌘B` 手动模糊屏幕开关 —— 隐私盾盖住菜单栏时的**逃逸舱门**
-  - `⌥⌘P` 暂停 / 恢复监控
-- **诚实隐私**：摄像头指示灯亮 = 正在监控；锁屏/合盖自动停采，回来自动恢复
-
-## 构建与运行
-
-```bash
-make cert   # 一次性：生成自签名证书（让摄像头授权在重编译后保持有效）
-make run    # 编译 + 打包 + 签名 + 启动
-make log    # 实时日志（人脸数/姿态/状态机迁移）
-make test   # NoPeekCore 纯逻辑单测（55 项断言）
-make reset-permissions  # 重置摄像头/通知授权，重测首次流程
-make clean
-```
-
-> 为什么需要 `make cert`：macOS TCC 把权限绑定到代码签名身份。ad-hoc 签名每次编译 cdhash 都会变 → 摄像头权限每次重弹。自签名证书固定了身份，授权一次终身有效。证书只在你的本机钥匙串，永不提交进 git。
-
-## 检测算法
-
-```
-摄像头 720p 帧 → 节流 10fps → Vision 三级分析（每帧）：
-  1. VNDetectFaceRectanglesRequest rev3     找出所有人脸（丢弃过小噪点框）
-  2. VNDetectFaceLandmarksRequest rev3      级联填充 yaw/pitch/roll 头部姿态
-  3. VNDetectFaceCaptureQualityRequest      质量分（过滤模糊/反光假脸）
-  4. VNGenerateImageFeaturePrintRequest     （已录入机主时）每脸身份距离 d
-           ↓
-  FaceTracker：IoU>0.3 跨帧跟踪 → 稳定 trackID；4 秒零微动 → 标记"海报脸"
-           ↓
-  身份平滑（V2）：每轨道 EMA 平滑 d（0.55·旧+0.45·新）；转头>30°或低质量时
-     冻结读数；机主/陌生人判定带 ±0.10 迟滞缓冲带 —— d 在阈值附近徘徊不会翻转
-           ↓
-  IntruderAssessor（纯函数）：
-     V2：有判定为机主的脸 → 它是机主；其余脸（含"机主不在场"时的所有脸）过门
-     V1：最大脸 = 机主；其余脸过 5 道门：
-     距离 ≥ 0.004 归一化面积(≈2.5m) ｜ |yaw|≤35° 且 |pitch|≤30° ｜ 质量≥0.10
-     ｜ 非静止海报脸 ｜ 姿态缺失默认算"面向"（宁多报勿漏报，可开严格模式）
-           ↓
-  DetectionStateMachine（迟滞防抖）：
-     监控 →(连续3帧闯入, ~0.3s)→ 报警 →(连续12帧干净, ~1.2s)→ 冷却(4s) → 监控
-     冷却期内 2 帧闯入 → 立即重新报警
-```
-
-误报对策：海报/照片（微动抑制）、远处路人（距离门）、路过不看屏幕（朝向门）、单帧抖动（迟滞）、机主本人姿态/光线漂移（身份缓冲带）。已知局限：电视里会动的陌生人脸仍可能触发（此时它确实"在看你屏幕"——语义上不算冤枉）。
-
-**机主识别细节**：录入是 Face ID 式引导——脸对准椭圆框并保持 0.8 秒即**自动开始**，缓慢转头一圈点亮 8 个姿态扇区（每扇区 1 个样本）+ 正对 3 个样本，共 11 个特征印迹，覆盖运行时实际匹配的 ±30° 姿态范围。样本经 NSSecureCoding 归档存 Keychain（ThisDeviceOnly），匹配走 `computeDistance` 取最近样本距离。调参：打开调试浮层（菜单栏 → 调试浮层）看自己脸上的 `d=` 实时值与 OWNER/STRANGER 标签，再把"识别严格度"滑块调到「自己 d 值 + 0.15」左右。
-
-## 隐私设计
-
-- 像素缓冲只在内存中同步消费，**从不写盘、从不保留**
-- 摄像头预览画面只在你主动点开悬浮窗时显示
-- 隐私盾启动时悬浮窗被盖在盾下（层级设计）——窥屏者看不到预览
-- 无网络请求、无沙盒外访问、无埋点
-
-## 项目结构
-
-```
-Makefile                   # 无 Xcode 构建：swiftc 单模块编译 + .app 组装 + 签名
-Resources/Info.plist       # LSUIElement + NSCameraUsageDescription（bundle ID 勿改）
-Sources/
-  NoPeekCore/              # 纯逻辑（可单测）：检测类型、五门判定、状态机、人脸跟踪
-  NoPeek/                  # App 壳：摄像头管线、Vision 分析、告警、菜单栏、悬浮窗、设置
-Tests/NoPeekCoreTests/     # 断言式测试运行器（CLT 无 XCTest，swiftc 直编）
-```
-
-## 路线图
-
-- 机主样本在线自适应：光线/外观随天变化时自动补充高置信度样本，减少重新录入
-- 可选替换 MobileFaceNet 类专用嵌入模型（`OwnerMatcher` 类边界已隔离，换实现不动管线）
-
-## 故障排查
-
-| 症状 | 处理 |
-|---|---|
-| 摄像头权限反复弹 | 没跑 `make cert`；或改了 bundle ID（勿改） |
-| 快捷键无响应 | 与其他 App 的 ⌥⌘B/⌥⌘P 冲突；`make log` 里会有注册失败警告 |
-| 误报（电视/海报） | 设置里开"抑制静止人脸"、调近检测距离、或开严格朝向模式 |
-| 机主自己被误报 | 开调试浮层看自己脸上的 d= 值，把"识别严格度"滑块调高；或换个光线重新录入 |
-| 想彻底重来 | `make reset-permissions` + 删除应用 |
+<p align="center"><a href="README_zh-CN.md">简体中文文档</a></p>
 
 ---
 
-*License: 仅供个人使用。*
+## Overview
+
+Shoulder surfing is the most low-tech attack there is: someone simply looks at your screen — in a café, an open office, a library, on a train. NoPeek turns your Mac's built-in camera into a quiet guard. It watches for faces behind you, decides whether they are actually looking at your screen, and reacts within a fraction of a second: a menu-bar warning, a full-screen privacy shield, a sound, a notification — or any combination you choose.
+
+Everything runs locally on the Neural Engine. Camera frames are consumed in memory and discarded immediately; nothing is recorded, stored, or transmitted. The app is pure Swift (AVFoundation + Vision) with zero third-party dependencies, and it builds without Xcode — Command Line Tools are all you need.
+
+## Features
+
+**Detection**
+
+- Real-time face detection at 720p, ~10 fps analysis (6 fps eco mode, 15 fps burst mode when a face appears)
+- Per-face telemetry: bounding-box area (distance proxy), yaw/pitch/roll head pose, capture quality
+- **Owner recognition (V2)**: enroll once, and only strangers trigger alerts — including when you are away from the desk and someone else walks up
+- Anti-jitter stack: per-track EMA smoothing, pose-gated identity updates, a ±0.10 verdict deadband, and an occlusion guard that tolerates a partially covered face
+- Poster/photo suppression via micro-motion analysis (a printed face doesn't fidget)
+
+**Alerts** — four independently toggleable channels:
+
+- Menu-bar visual alarm (icon turns red and pulses)
+- Full-screen privacy shield on every display (click-through, auto-dismisses when the coast is clear)
+- Alert sound
+- System notification
+
+**Away protection** — if you leave, the shield rises automatically after a configurable delay (3–30 s) and drops the moment you return.
+
+**Floating status chip** — a small rounded-square panel whose color mirrors the state (green / yellow / pulsing red / gray). Draggable, docks to screen edges as a visible tab, expands on click into a live camera preview card.
+
+**Global hotkeys** — `⌥⌘B` toggles the privacy shield manually (your escape hatch), `⌥⌘P` pauses/resumes monitoring.
+
+**Honest privacy** — the camera indicator LED means what it says. Capture stops automatically on lock screen, sleep, or lid close, and resumes when you do.
+
+## How It Works
+
+```
+Camera @720p → throttled to 10 fps → Vision pipeline (per frame):
+  1. VNDetectFaceRectanglesRequest rev3     locate all faces (drop tiny noise boxes)
+  2. VNDetectFaceLandmarksRequest rev3      cascade-fills yaw/pitch/roll head pose
+  3. VNDetectFaceCaptureQualityRequest      quality score (filters blurry/glare faces)
+  4. VNGenerateImageFeaturePrintRequest     identity distance d per face (when enrolled)
+           ↓
+  FaceTracker: IoU > 0.3 cross-frame matching → stable trackIDs;
+               4 s without micro-motion → flagged as a poster/photo
+           ↓
+  Identity smoothing: per-track EMA on d (0.55·prev + 0.45·raw); readings frozen while
+               |yaw| > 30° or quality < 0.35; owner/stranger verdict hysteresis of
+               ±0.10 around the threshold; occlusion spikes held for up to 5 frames
+           ↓
+  IntruderAssessor (pure function):
+     V2: a face with an "owner" verdict is you; every other face is gated
+     V1 (no enrollment): the largest face is assumed to be you; the rest pass 5 gates:
+         distance ≥ 0.004 normalized area (≈2.5 m)  |  |yaw| ≤ 35°, |pitch| ≤ 30°
+         |  quality ≥ 0.10  |  not a static poster  |  missing pose counts as facing
+           ↓
+  DetectionStateMachine (leaky-bucket hysteresis):
+     monitoring →(suspicion score 3, ~0.2–0.3 s)→ alert →(12 clean frames)→ cooldown (4 s) → monitoring
+     any intrusion during cooldown re-alerts immediately
+```
+
+False-positive countermeasures: posters and photos (micro-motion suppression), distant passers-by (distance gate), people walking past without looking (pose gate), single-frame flicker (leaky-bucket confirmation), and drift in your own appearance (identity deadband + EMA). Known limitation: a moving face on TV can still trigger an alert — semantically, it *is* watching your screen.
+
+**Owner recognition in detail.** Enrollment is Face-ID-style: center your face in the oval guide and hold still for 0.8 s to auto-start, then slowly turn your head in a circle. The app collects 11 feature prints — 3 frontal + 1 per pose sector (8 sectors covering ±35°) — matching the exact pose range used at runtime. Samples are archived with NSSecureCoding and stored in the Keychain (kSecAttrAccessibleWhenUnlockedThisDeviceOnly). Matching takes the nearest-sample `computeDistance`. To tune: open the debug overlay (menu bar → Debug Overlay), watch the live `d=` value and OWNER/STRANGER label on your own face, then set the recognition-strictness slider to roughly *your d + 0.15*.
+
+## Privacy
+
+- Pixel buffers are consumed synchronously in memory — **never written to disk, never retained**
+- No network requests, no analytics, no sandbox escapes
+- The camera preview is shown only when you explicitly open it
+- While the privacy shield is up, the floating panel sits *below* it by design — a peeker never sees the preview
+- The system camera indicator is never interfered with; it is the honest signal that monitoring is active
+
+## Installation
+
+### Download a release
+
+Grab `NoPeek.app.zip` from the [latest release](https://github.com/EricYuan2007/nopeek/releases), unzip, and open it. The binary is self-signed, so Gatekeeper will ask once — right-click → **Open**.
+
+### Build from source
+
+Requires macOS 14+ and Command Line Tools (`xcode-select --install`). No Xcode, no dependencies.
+
+```bash
+git clone https://github.com/EricYuan2007/nopeek.git
+cd nopeek
+make cert   # one-time: mint a stable self-signed code-signing identity
+make run    # build, package, sign, launch
+```
+
+> Why `make cert`: macOS TCC binds permission grants to the code-signing identity. Ad-hoc signatures change on every recompile, so the camera permission would re-prompt after every build. A stable self-signed certificate makes the grant stick. The certificate lives only in your local keychain and is never committed to git.
+
+Useful targets:
+
+```bash
+make log                # live structured logs (face count, pose, state transitions)
+make test               # NoPeekCore unit tests (68 assertions)
+make icon               # regenerate the app icon (scripts/make-icon.swift → AppIcon.icns)
+make reset-permissions  # reset camera/notification grants to retest the first-run flow
+make clean
+```
+
+## Usage
+
+1. Launch via `make run` (or open the installed app). It lives in the menu bar — no Dock icon.
+2. Grant camera access when prompted. The icon turns green: monitoring.
+3. Open **Settings** from the menu and enroll your face (takes ~15 seconds with the guided ring).
+4. Done. Have a friend walk up behind you to see it fire; use the debug overlay to watch the reasoning live.
+
+## Project Structure
+
+```
+Makefile                   # no-Xcode build: single-module swiftc + .app assembly + codesign
+Resources/Info.plist       # LSUIElement + NSCameraUsageDescription (bundle ID is load-bearing)
+Resources/AppIcon.icns     # generated by scripts/make-icon.swift
+Sources/
+  NoPeekCore/              # pure logic, unit-testable: detection types, 5-gate assessor,
+                           # state machine, face tracker, enrollment pose bins
+  NoPeek/                  # app shell: camera pipeline, Vision analysis, alerts, menu bar,
+                           # floating chip, enrollment UI, settings
+Tests/NoPeekCoreTests/     # assertion-based runner (no XCTest under plain CLT)
+scripts/make-icon.swift    # programmatic icon generator
+```
+
+## Roadmap
+
+- Online adaptation of owner samples: supplement high-confidence samples as lighting/appearance drift, reducing re-enrollment
+- Optional swap to a dedicated embedding model (MobileFaceNet-class); the `OwnerMatcher` boundary is isolated, so the pipeline is untouched
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Camera permission re-prompts after every build | You skipped `make cert`, or the bundle ID was changed (don't) |
+| Hotkeys do nothing | Another app owns `⌥⌘B`/`⌥⌘P`; `make log` prints a registration warning |
+| False alerts (TV, posters) | Enable static-face suppression, shorten the detection distance, or enable strict pose mode |
+| You yourself trigger alerts | Open the debug overlay, read your live `d=` value, raise the strictness slider accordingly — or re-enroll in better light |
+| Nuclear option | `make reset-permissions`, then delete the app |
+
+## License
+
+[MIT](LICENSE) © 2026 EricYuan2007
+
+## Acknowledgments
+
+NoPeek was informed by prior art in the shoulder-surfing-detection space (e.g. EyesOff) and re-implements the idea entirely on Apple's Vision framework with zero third-party code.
