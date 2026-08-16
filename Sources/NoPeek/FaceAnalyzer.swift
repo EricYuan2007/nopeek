@@ -17,9 +17,6 @@ protocol FaceEmbeddingExtractor: Sendable {
 ///      yaw/pitch/roll; quality filters blur/reflection junk
 final class FaceAnalyzer: @unchecked Sendable {
 
-    /// Snapshot pushed from MainActor whenever settings change.
-    var config = DetectionConfig()
-
     /// V2 seam — nil in V1.
     var embeddingExtractor: (any FaceEmbeddingExtractor)?
 

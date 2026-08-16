@@ -19,6 +19,15 @@ let suites: [(String, () -> Void)] = [
     ("quality gate", testAssessorQualityGate),
     ("static suppression", testAssessorStaticSuppression),
     ("owner never static-suppressed", testAssessorOwnerNeverStaticSuppressed),
+    // DetectionStateMachine
+    ("boots to monitoring", testMachineBootsToMonitoring),
+    ("flicker never alerts", testMachineFlickerNeverAlerts),
+    ("sustained intruder alerts", testMachineSustainedIntruderAlerts),
+    ("slow exit prevents flapping", testMachineSlowExitPreventsFlapping),
+    ("cooldown fast retrigger", testMachineCooldownFastRetrigger),
+    ("cooldown expires to monitoring", testMachineCooldownExpiresToMonitoring),
+    ("disable from alert", testMachineDisableFromAlert),
+    ("ignores frames when off", testMachineIgnoresFramesWhenOff),
 ]
 
 for (name, body) in suites {
