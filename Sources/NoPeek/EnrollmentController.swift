@@ -3,21 +3,15 @@ import AVFoundation
 import SwiftUI
 import Vision
 
-/// Owner enrollment: a guided capture flow. Problems with the old one-shot version:
-/// sampling started the instant the window opened (before the user had reacted), and
-/// 8 near-identical frontal samples covered too little appearance space — the matcher
-/// then misjudged the owner under everyday pose/lighting drift.
-///
-/// The guided flow instead:
-///   1. counts down 3 s so the user is ready and framed (oval guide on the preview);
-///   2. walks three phases with on-screen instructions — frontal ×4, slow left/right
-///      turns ×6 (both directions required), slow nod/tilt ×2 — each sample gated by
-///      the phase's pose range, capture quality, and (phase 0) face centering/size;
-///   3. paces captures (~0.35 s) so samples differ; per-phase timeout advances with
-///      whatever was captured; needs ≥4 samples total to save.
+/// Owner enrollment, Face-ID style: the user frames their face in the oval guide and
+/// capture STARTS AUTOMATICALLY once the pose is stable — no button, no countdown to
+/// race. A ring of 8 sectors appears around the oval; turning the head lights up the
+/// sector in that direction (one sample per sector + 3 near-frontal), so the enrolled
+/// set covers every pose the runtime matcher can encounter. Full coverage → save.
 ///
 /// The capture itself runs on the camera queue (frames must not leave it); this
-/// controller is MainActor and only receives progress updates.
+/// controller is MainActor and only receives progress updates. Pose binning is the
+/// unit-tested pure function PoseBins.bin (NoPeekCore).
 @MainActor
 final class EnrollmentController: ObservableObject {
 
@@ -25,8 +19,9 @@ final class EnrollmentController: ObservableObject {
 
     enum State: Equatable {
         case idle
-        case countdown(Int)
-        case capturing(phase: Int, phaseCount: Int, collected: Int, target: Int)
+        /// Window open, waiting for a well-framed stable face to auto-start.
+        case waitingForFace
+        case capturing(collected: Int, target: Int, sectors: [Bool], centerDone: Int)
         case done(Int)
         case failed(String)
     }
@@ -37,53 +32,24 @@ final class EnrollmentController: ObservableObject {
     private var window: NSWindow?
     private var analyzer: FaceAnalyzer?
     private var session: AVCaptureSession?
-    private var countdownTimer: Timer?
-    private var phaseTimer: Timer?
 
-    // MARK: - Capture plan (all state lives in the camera-queue lock-box)
+    // MARK: - Capture tuning
 
-    private struct Phase {
-        let instruction: String
-        let target: Int
-        /// Camera-queue gate: does this frame's face qualify as a sample for the phase?
-        let accepts: (_ yaw: Double?, _ pitch: Double?, _ quality: Float, _ box: CGRect) -> Bool
-    }
-
-    // nonisolated: referenced from collect() on the camera queue.
-    nonisolated private static let pacing: TimeInterval = 0.35
-    nonisolated private static let phaseTimeout: TimeInterval = 12
-    nonisolated private static let minSamplesToSave = 4
-
-    nonisolated private static func makePhases() -> [Phase] {
-        [
-            Phase(instruction: "正对屏幕，把脸放进椭圆框", target: 4) { yaw, pitch, quality, box in
-                guard quality >= 0.30 else { return false }
-                guard let yaw, abs(yaw) <= 0.21, let pitch, abs(pitch) <= 0.26 else { return false }
-                // Framing gate: near-centered and close enough (≲1.2 m).
-                let centerX = box.midX, centerY = box.midY
-                return box.width * box.height >= 0.012
-                    && (0.25...0.75).contains(centerX) && (0.2...0.85).contains(centerY)
-            },
-            Phase(instruction: "缓慢向左转头，再向右转头", target: 6) { yaw, _, quality, _ in
-                guard quality >= 0.25, let yaw else { return false }
-                let magnitude = abs(yaw)
-                return magnitude > 0.21 && magnitude <= 0.70 // 12°…40°
-            },
-            Phase(instruction: "缓慢抬头，再低头", target: 2) { _, pitch, quality, _ in
-                guard quality >= 0.25, let pitch else { return false }
-                return abs(pitch) >= 0.17 // ≥10°
-            },
-        ]
-    }
+    /// Samples are paced so consecutive prints actually differ.
+    nonisolated private static let pacing: TimeInterval = 0.3
+    /// How long the framing pose must hold before capture auto-starts.
+    nonisolated private static let autoStartHold: TimeInterval = 0.8
+    nonisolated private static let minQuality: Float = 0.25
+    nonisolated private static let centerMinQuality: Float = 0.30
 
     /// Camera-queue confined capture state (all access under its lock).
     private final class CaptureContext: @unchecked Sendable {
         var matcher: OwnerMatcher?
         var prints: [VNFeaturePrintObservation] = []
-        var phaseIndex = 0
-        var phaseCollected = 0
-        var yawPositive = 0 // phase 1 sign buckets — both directions must be covered
-        var yawNegative = 0
+        var sectors = [Bool](repeating: false, count: PoseBins.sectorCount)
+        var centerDone = 0
+        var capturing = false // auto-start latch
+        var framedSince: TimeInterval?
         var lastCaptureAt: TimeInterval = 0
         let lock = NSLock()
     }
@@ -104,36 +70,24 @@ final class EnrollmentController: ObservableObject {
 
     func start() {
         guard case .idle = state, let analyzer, let session else { return }
-        resetCaptureContext()
+        captureContext.lock.lock()
+        captureContext.prints = []
+        captureContext.sectors = [Bool](repeating: false, count: PoseBins.sectorCount)
+        captureContext.centerDone = 0
+        captureContext.capturing = false
+        captureContext.framedSince = nil
+        captureContext.lastCaptureAt = 0
+        captureContext.lock.unlock()
 
-        showWindow(session: session)
+        state = .waitingForFace
         analyzer.verboseAnalysis = true
-
-        // Countdown BEFORE arming the collector — the user gets 3 s to settle into
-        // the guide oval; no sample can be captured before they're ready.
-        state = .countdown(3)
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, case .countdown(let n) = self.state else { return }
-                if n > 1 {
-                    self.state = .countdown(n - 1)
-                } else {
-                    self.countdownTimer?.invalidate()
-                    self.beginCapture()
-                }
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        countdownTimer = timer
-    }
-
-    private func beginCapture() {
-        guard let analyzer else { return }
-        armPhaseTimer()
-        state = .capturing(phase: 0, phaseCount: 0, collected: 0, target: Self.totalTarget)
+        // The collector is armed immediately — it performs the framing gate and the
+        // auto-start latch on the camera queue, so capture begins the moment the
+        // user's face is properly placed (no racing a countdown).
         analyzer.enrollmentCollector = { [weak self] face, quality, handler in
             self?.collect(face: face, quality: quality, handler: handler)
         }
+        showWindow(session: session)
     }
 
     func cancel() {
@@ -151,123 +105,100 @@ final class EnrollmentController: ObservableObject {
         Log.detection.info("owner enrollment cleared")
     }
 
-    nonisolated private static var totalTarget: Int { makePhases().reduce(0) { $0 + $1.target } }
-
-    private func resetCaptureContext() {
-        captureContext.lock.lock()
-        captureContext.prints = []
-        captureContext.phaseIndex = 0
-        captureContext.phaseCollected = 0
-        captureContext.yawPositive = 0
-        captureContext.yawNegative = 0
-        captureContext.lastCaptureAt = 0
-        captureContext.lock.unlock()
-    }
-
-    /// Per-phase safety net: if the user can't hit a pose, advance with whatever was
-    /// captured rather than trapping them in the flow.
-    private func armPhaseTimer() {
-        phaseTimer?.invalidate()
-        let timer = Timer(timeInterval: Self.phaseTimeout, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.advancePhase() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        phaseTimer = timer
-    }
-
-    /// MainActor. Move to the next phase, or finish when the plan is done.
-    private func advancePhase() {
-        captureContext.lock.lock()
-        let next = captureContext.phaseIndex + 1
-        let total = captureContext.prints.count
-        if next < Self.makePhases().count {
-            captureContext.phaseIndex = next
-            captureContext.phaseCollected = 0
-            captureContext.yawPositive = 0
-            captureContext.yawNegative = 0
-        }
-        captureContext.lock.unlock()
-
-        if next < Self.makePhases().count {
-            state = .capturing(phase: next, phaseCount: 0, collected: total, target: Self.totalTarget)
-            armPhaseTimer()
-        } else {
-            finishCapture(save: total >= Self.minSamplesToSave)
-            if total < Self.minSamplesToSave {
-                state = .failed("采样不足（\(total) 个）—— 请对准椭圆框、按提示转动头部后重试")
-            }
-        }
-    }
-
-    /// Camera queue. Phase-gated + paced; appends one feature print per accepted sample.
+    /// Camera queue. Framing gate → auto-start latch → pose-bin coverage capture.
     private nonisolated func collect(face: VNFaceObservation, quality: Float, handler: VNImageRequestHandler) {
         let now = ProcessInfo.processInfo.systemUptime
         let yaw = face.yaw?.doubleValue
         let pitch = face.pitch?.doubleValue
-        let phases = Self.makePhases()
+        let bin = PoseBins.bin(yaw: yaw, pitch: pitch)
+        let box = face.boundingBox
+
+        // Framing gate for auto-start: near-frontal, centered, close enough, sharp.
+        let centered = (0.28...0.72).contains(box.midX) && (0.22...0.82).contains(box.midY)
+        let framed = bin == -1 && quality >= Self.centerMinQuality
+            && box.width * box.height >= 0.012 && centered
 
         let context = captureContext
         context.lock.lock()
-        let phaseIndex = context.phaseIndex
-        guard phaseIndex < phases.count else { context.lock.unlock(); return }
-        let phase = phases[phaseIndex]
-        let paced = now - context.lastCaptureAt >= Self.pacing
-        // Phase 1 requires BOTH turn directions; a saturated-sign sample is skipped
-        // unless the phase is already over-collected (then take it and move on).
-        let signSaturated: Bool
-        if phaseIndex == 1, let yaw {
-            let positive = yaw > 0
-            let sameSignCount = positive ? context.yawPositive : context.yawNegative
-            let otherSignCount = positive ? context.yawNegative : context.yawPositive
-            signSaturated = sameSignCount >= 2 && otherSignCount < 2 && context.phaseCollected < phase.target + 2
-        } else {
-            signSaturated = false
+        if !context.capturing {
+            if framed {
+                if let since = context.framedSince, now - since >= Self.autoStartHold {
+                    context.capturing = true
+                    context.framedSince = nil
+                    // Enqueuing a Task never blocks — safe under the lock.
+                    Task { @MainActor [weak self] in self?.didAutoStart() }
+                    // Fall through — this frame doubles as the first center sample.
+                } else {
+                    if context.framedSince == nil { context.framedSince = now }
+                    context.lock.unlock()
+                    return
+                }
+            } else {
+                context.framedSince = nil
+                context.lock.unlock()
+                return
+            }
         }
-        let accepted = paced
-            && phase.accepts(yaw, pitch, quality, face.boundingBox)
-            && !signSaturated
-        if accepted { context.lastCaptureAt = now }
+
+        // Capturing. Pace + quality + bin coverage gates.
+        guard now - context.lastCaptureAt >= Self.pacing,
+              quality >= Self.minQuality,
+              let bin else {
+            context.lock.unlock()
+            return
+        }
+        let wanted: Bool
+        if bin < 0 {
+            wanted = quality >= Self.centerMinQuality && context.centerDone < PoseBins.centerTarget
+        } else {
+            wanted = !context.sectors[bin]
+        }
+        guard wanted else {
+            context.lock.unlock()
+            return
+        }
+        context.lastCaptureAt = now
         let matcher = context.matcher
         context.lock.unlock()
-        guard accepted, let matcher else { return }
+        guard let matcher else { return }
 
         guard let print = matcher.featurePrint(for: face, handler: handler) else { return }
 
         context.lock.lock()
         context.prints.append(print)
-        context.phaseCollected += 1
-        if phaseIndex == 1, let yaw {
-            if yaw > 0 { context.yawPositive += 1 } else { context.yawNegative += 1 }
-        }
+        if bin < 0 { context.centerDone += 1 } else { context.sectors[bin] = true }
         let collected = context.prints.count
-        let phaseCount = context.phaseCollected
-        let phaseDone: Bool
-        if phaseIndex == 1 {
-            phaseDone = phaseCount >= phase.target
-                && context.yawPositive >= 2 && context.yawNegative >= 2
-        } else {
-            phaseDone = phaseCount >= phase.target
-        }
+        let sectors = context.sectors
+        let centerDone = context.centerDone
+        let complete = centerDone >= PoseBins.centerTarget && sectors.allSatisfy { $0 }
         context.lock.unlock()
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.state = .capturing(phase: phaseIndex, phaseCount: phaseCount,
-                                    collected: collected, target: Self.totalTarget)
-            if phaseDone { self.advancePhase() }
+            self.state = .capturing(collected: collected, target: PoseBins.totalTarget,
+                                    sectors: sectors, centerDone: centerDone)
+            if complete { self.finishCapture(save: true) }
         }
+    }
+
+    /// MainActor. Framing pose held long enough — flip to the ring UI with a cue.
+    private func didAutoStart() {
+        guard case .waitingForFace = state else { return }
+        state = .capturing(collected: 0, target: PoseBins.totalTarget,
+                           sectors: [Bool](repeating: false, count: PoseBins.sectorCount),
+                           centerDone: 0)
+        NSSound(named: "Tink")?.play()
     }
 
     /// MainActor. Stops the collector; optionally persists what was captured.
     private func finishCapture(save: Bool) {
-        countdownTimer?.invalidate()
-        phaseTimer?.invalidate()
         analyzer?.enrollmentCollector = nil
         analyzer?.verboseAnalysis = false
 
         captureContext.lock.lock()
         let prints = captureContext.prints
         let matcher = captureContext.matcher
+        let wasCapturing = captureContext.capturing
         captureContext.prints = []
         captureContext.lock.unlock()
 
@@ -278,6 +209,7 @@ final class EnrollmentController: ObservableObject {
                 enrolledSampleCount = prints.count
                 SettingsStore.shared.ownerRecognitionEnabled = true
                 state = .done(prints.count)
+                NSSound(named: "Glass")?.play()
                 Log.detection.info("enrollment saved \(prints.count) samples to keychain")
             } catch {
                 state = .failed("保存到钥匙串失败：\(error.localizedDescription)")
@@ -293,14 +225,9 @@ final class EnrollmentController: ObservableObject {
                 self?.window?.close()
                 self?.state = .idle
             }
+        } else if !wasCapturing, case .idle = state {
+            window?.close() // cancelled before capture began — close immediately
         }
-    }
-
-    /// Instruction for the current capturing state (UI).
-    var currentInstruction: String {
-        guard case .capturing(let phase, _, _, _) = state else { return "" }
-        let phases = Self.makePhases()
-        return phase < phases.count ? phases[phase].instruction : ""
     }
 
     // MARK: - Window
@@ -313,7 +240,7 @@ final class EnrollmentController: ObservableObject {
             window.title = "录入机主人脸"
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
-            window.setContentSize(NSSize(width: 400, height: 430))
+            window.setContentSize(NSSize(width: 400, height: 420))
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -328,39 +255,62 @@ private struct EnrollmentView: View {
     let session: AVCaptureSession
     @ObservedObject var controller: EnrollmentController
 
+    /// Extract the coverage arrays from the state (defaults while waiting).
+    private var sectors: [Bool] {
+        if case .capturing(_, _, let sectors, _) = controller.state { return sectors }
+        return [Bool](repeating: false, count: PoseBins.sectorCount)
+    }
+    private var centerDone: Int {
+        if case .capturing(_, _, _, let centerDone) = controller.state { return centerDone }
+        return 0
+    }
+
     var body: some View {
         VStack(spacing: 14) {
             ZStack {
                 CameraPreviewRepresentable(session: session)
                     .frame(width: 360, height: 202)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                // Framing guide — phase 0's gate roughly matches this oval.
+                // Faint framing oval — the auto-start gate roughly matches it.
                 Ellipse()
-                    .stroke(Color.white.opacity(0.8), lineWidth: 2)
-                    .frame(width: 150, height: 190)
-                    .shadow(color: .black.opacity(0.4), radius: 2)
+                    .stroke(Color.white.opacity(0.35), lineWidth: 1.5)
+                    .frame(width: 148, height: 186)
 
-                if case .countdown(let n) = controller.state {
-                    Text("\(n)")
-                        .font(.system(size: 64, weight: .bold))
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.6), radius: 4)
+                // Coverage ring: 8 sectors, one per head direction. (Visual mapping
+                // is self-correcting — the user turns toward whatever stays gray.)
+                ForEach(0..<PoseBins.sectorCount, id: \.self) { index in
+                    Ellipse()
+                        .trim(from: Double(index) / Double(PoseBins.sectorCount) + 0.012,
+                              to: Double(index + 1) / Double(PoseBins.sectorCount) - 0.012)
+                        .stroke(sectors[index] ? Color.green : Color.white.opacity(0.55),
+                                style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                        .frame(width: 168, height: 206)
                 }
+
+                // Center-bin progress: 3 dots for the near-frontal samples.
+                HStack(spacing: 6) {
+                    ForEach(0..<PoseBins.centerTarget, id: \.self) { dot in
+                        Circle()
+                            .fill(dot < centerDone ? Color.green : Color.white.opacity(0.55))
+                            .frame(width: 8, height: 8)
+                    }
+                }
+                .offset(y: 108)
             }
 
             switch controller.state {
             case .idle:
                 Text("准备就绪").foregroundStyle(.secondary)
-            case .countdown:
-                Text("请坐好，把脸对准椭圆框…")
+            case .waitingForFace:
+                Text("把脸对准椭圆框，保持稳定将自动开始")
                     .font(.callout)
-            case .capturing(let phase, let phaseCount, let collected, let target):
+            case .capturing(let collected, let target, _, _):
                 VStack(spacing: 6) {
-                    Text(controller.currentInstruction)
+                    Text("缓慢转头一圈，点亮所有扇区")
                         .font(.callout)
                         .fontWeight(.medium)
                     ProgressView(value: Double(collected), total: Double(target))
-                    Text("第 \(phase + 1)/3 步 · 本步 \(phaseCount) 个 · 共 \(collected)/\(target) 个样本")
+                    Text("\(collected)/\(target) 个样本 · 朝灰色扇区方向转头")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

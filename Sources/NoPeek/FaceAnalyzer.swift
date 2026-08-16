@@ -137,11 +137,13 @@ final class FaceAnalyzer: @unchecked Sendable {
             }
 
             // Enrollment capture: largest face, quality-gated, paced by the collector.
+            // The landmarks-derived observation is preferred over the rectangles one —
+            // its yaw/pitch are the reliable reads the capture gates depend on.
             if let collector = enrollmentCollector,
                let largest = rawFaces.max(by: { $0.boundingBox.width * $0.boundingBox.height
                                                 < $1.boundingBox.width * $1.boundingBox.height }) {
                 let quality = qualityByUUID[largest.uuid]?.faceCaptureQuality ?? 0
-                collector(largest, quality, handler)
+                collector(poseByUUID[largest.uuid] ?? largest, quality, handler)
             }
 
             var tracked = tracker.process(faces, at: timestamp)

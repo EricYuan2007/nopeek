@@ -29,6 +29,10 @@ let suites: [(String, () -> Void)] = [
     ("v2 verdict wins over raw distance", testV2VerdictWinsOverRawDistance),
     ("v2 stranger verdict wins too", testV2StrangerVerdictWinsToo),
     ("v2 verdict-only frame stays v2", testV2VerdictParticipatesInIdentityPresence),
+    // PoseBins (guided enrollment)
+    ("pose bins center", testPoseBinsCenter),
+    ("pose bins sectors", testPoseBinsSectors),
+    ("pose bins rejects", testPoseBinsRejects),
     // DetectionStateMachine
     ("boots to monitoring", testMachineBootsToMonitoring),
     ("flicker never alerts", testMachineFlickerNeverAlerts),
