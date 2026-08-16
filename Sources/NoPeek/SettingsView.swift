@@ -10,19 +10,33 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        Form {
-            Section("监控") {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                monitoringSection
+                alertsSection
+                bubbleSection
+                permissionSection
+                privacyNote
+            }
+            .padding(16)
+        }
+        // Explicit size: Form+NSHostingController can collapse to a broken minimal
+        // window on some macOS versions; a fixed frame renders deterministically.
+        .frame(width: 500, height: 640)
+    }
+
+    private var monitoringSection: some View {
+        GroupBox("监控") {
+            VStack(alignment: .leading, spacing: 10) {
                 Toggle("启用监控", isOn: $settings.monitoringEnabled)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("检测距离：约 \(estimatedMeters, specifier: "%.1f") 米以内")
-                        .font(.callout)
-                    Slider(value: $settings.minIntruderArea, in: 0.002...0.012) {
+                    HStack {
                         Text("检测距离")
-                    } minimumValueLabel: {
-                        Text("远").font(.caption)
-                    } maximumValueLabel: {
-                        Text("近").font(.caption)
+                        Spacer()
+                        Text("约 \(estimatedMeters, specifier: "%.1f") 米以内")
+                            .foregroundStyle(.secondary)
                     }
+                    Slider(value: $settings.minIntruderArea, in: 0.002...0.012)
                     Text("只在闯入者足够接近（能看清屏幕）时报警")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -31,32 +45,39 @@ struct SettingsView: View {
                 Toggle("严格朝向模式", isOn: $settings.strictPoseMode)
                 Toggle("抑制静止人脸（海报/照片）", isOn: $settings.suppressStaticFaces)
             }
+            .padding(.vertical, 6)
+        }
+    }
 
-            Section("检测到窥屏时") {
+    private var alertsSection: some View {
+        GroupBox("检测到窥屏时") {
+            VStack(alignment: .leading, spacing: 10) {
                 Toggle("视觉警报（菜单栏图标变红闪烁）", isOn: $settings.alertVisual)
                 Toggle("全屏隐私模糊", isOn: $settings.alertBlur)
                 Toggle("提示音", isOn: $settings.alertSound)
                 Toggle("系统通知", isOn: $settings.alertNotification)
             }
+            .padding(.vertical, 6)
+        }
+    }
 
-            Section("悬浮窗") {
+    private var bubbleSection: some View {
+        GroupBox("悬浮窗") {
+            VStack(alignment: .leading, spacing: 10) {
                 Toggle("显示悬浮小窗", isOn: $settings.bubbleVisible)
                 Toggle("固定在原位（不自动隐藏）", isOn: $settings.bubblePinned)
             }
+            .padding(.vertical, 6)
+        }
+    }
 
-            Section("权限") {
+    private var permissionSection: some View {
+        GroupBox("权限") {
+            VStack(alignment: .leading, spacing: 10) {
                 cameraPermissionRow
             }
-
-            Section {
-                Text("所有画面仅在本机实时分析，绝不存储、上传或联网。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            .padding(.vertical, 6)
         }
-        .formStyle(.grouped)
-        .frame(width: 460)
-        .padding()
     }
 
     private var cameraPermissionRow: some View {
@@ -77,5 +98,12 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var privacyNote: some View {
+        Text("所有画面仅在本机实时分析，绝不存储、上传或联网。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
     }
 }

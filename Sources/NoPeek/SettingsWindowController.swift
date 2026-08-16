@@ -15,10 +15,14 @@ final class SettingsWindowController {
             window.title = "NoPeek 设置"
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.isReleasedWhenClosed = false
+            // Belt and braces for the sizing-collapse failure mode: fix the content
+            // size explicitly instead of relying on hosting-controller sizing.
+            window.setContentSize(NSSize(width: 500, height: 640))
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 }
