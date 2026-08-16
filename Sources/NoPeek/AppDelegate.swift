@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotKeys = GlobalHotKey()
     private var floatingBubble: FloatingPanelController!
     private let onboarding = OnboardingWindowController()
+    private let ownerMatcher = OwnerMatcher()
     private lazy var stateMachine = DetectionStateMachine(config: Self.makeConfig(from: settings))
 
     /// Whether the camera is currently allowed to run (not locked / not asleep).
@@ -61,6 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         settings.onChange = { [weak self] in self?.applySettings() }
 
+        // V2 owner recognition: load enrolled prints from the Keychain, wire the
+        // matcher into the analyzer, and let the settings UI drive enrollment.
+        ownerMatcher.loadFromStore()
+        faceAnalyzer.ownerMatcher = ownerMatcher
+        EnrollmentController.shared.configure(session: cameraManager.captureSession,
+                                              analyzer: faceAnalyzer,
+                                              matcher: ownerMatcher)
+
         floatingBubble = FloatingPanelController(actions: .init(
             onTogglePause: { [weak self] in self?.togglePause() },
             onToggleManualBlur: { [weak self] in self?.toggleManualBlur() },
@@ -68,6 +77,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ))
         floatingBubble.attach(session: cameraManager.captureSession)
         floatingBubble.applyVisibility()
+
+        // Push persisted settings into the pipeline once at launch (stateMachine got
+        // its config via lazy init; this also covers eco FPS + identity threshold).
+        applySettings()
 
         // Global escape hatches — crucial when the shield frosts the whole screen.
         hotKeys.register([
@@ -111,6 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.minIntruderArea = settings.minIntruderArea
         config.requireKnownPose = settings.strictPoseMode
         config.suppressStaticFaces = settings.suppressStaticFaces
+        config.ownerRecognitionEnabled = settings.ownerRecognitionEnabled
+        config.ownerMaxDistance = Float(settings.ownerMaxDistance)
         if settings.strictPoseMode {
             config.maxYawRad = 25 * .pi / 180
             config.maxPitchRad = 20 * .pi / 180
@@ -121,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applySettings() {
         stateMachine.updateConfig(Self.makeConfig(from: settings))
         cameraManager.analysisFPS = settings.ecoMode ? 6 : 10
+        faceAnalyzer.ownerMaxDistance = Float(settings.ownerMaxDistance)
         floatingBubble.applyVisibility()
         updateCameraRunState()
     }
@@ -145,7 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if observationCount % 10 == 0 {
             let summary = observation.faces.map { face in
                 let yaw = face.yawRad.map { String(format: "%.0f°", $0 * 180 / .pi) } ?? "?"
-                return "#\(face.trackID)(a=\(String(format: "%.4f", face.area)),yaw=\(yaw),q=\(String(format: "%.2f", face.quality))\(face.isStaticSuspect ? ",S" : ""))"
+                let distance = face.ownerDistance.map { String(format: ",d=%.2f", $0) } ?? ""
+                return "#\(face.trackID)(a=\(String(format: "%.4f", face.area)),yaw=\(yaw),q=\(String(format: "%.2f", face.quality))\(distance)\(face.isStaticSuspect ? ",S" : ""))"
             }.joined(separator: " ")
             // Geometry only (areas/angles/quality) — never image data. Public so the
             // numbers are visible for threshold calibration with `make log`.
@@ -158,7 +175,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleStateTransition(from: DetectionState, to: DetectionState, trigger: Assessment?) {
         if to == .alert {
-            Log.alert.info("ALERT — intruders=\(trigger?.intruders.count ?? 0)")
+            // Log the triggering faces (geometry/identity numbers only, never image
+            // data) so every alert episode is self-diagnosing from `make log` output.
+            let detail = (trigger?.intruders ?? []).map { face in
+                let yaw = face.yawRad.map { String(format: "%.0f°", $0 * 180 / .pi) } ?? "?"
+                let distance = face.ownerDistance.map { String(format: "%.2f", $0) } ?? "nil"
+                let verdict = face.isOwner.map { $0 ? "owner" : "stranger" } ?? "?"
+                return "#\(face.trackID)(a=\(String(format: "%.4f", face.area)),yaw=\(yaw),q=\(String(format: "%.2f", face.quality)),d=\(distance),id=\(verdict)\(face.isStaticSuspect ? ",S" : ""))"
+            }.joined(separator: " ")
+            Log.alert.info("ALERT — intruders=\(trigger?.intruders.count ?? 0) \(detail, privacy: .public)")
             alertManager.alertStarted()
         } else if from == .alert {
             alertManager.alertEnded()

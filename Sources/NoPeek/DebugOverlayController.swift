@@ -79,12 +79,20 @@ final class DebugOverlayController {
             let box = CALayer()
             box.frame = rect
             box.borderWidth = 2
-            box.borderColor = (face.isStaticSuspect ? NSColor.systemOrange : NSColor.systemGreen).cgColor
+            if face.isOwner == false {
+                box.borderColor = NSColor.systemRed.cgColor
+            } else if face.isStaticSuspect {
+                box.borderColor = NSColor.systemOrange.cgColor
+            } else {
+                box.borderColor = NSColor.systemGreen.cgColor
+            }
 
             let yawDeg = face.yawRad.map { String(format: "%.0f°", $0 * 180 / .pi) } ?? "?"
             let pitchDeg = face.pitchRad.map { String(format: "%.0f°", $0 * 180 / .pi) } ?? "?"
+            let distance = face.ownerDistance.map { String(format: " d=%.2f", $0) } ?? ""
+            let identity = face.isOwner.map { $0 ? " OWNER" : " STRANGER" } ?? ""
             let label = CATextLayer()
-            label.string = "#\(face.trackID) a=\(String(format: "%.4f", face.area)) y=\(yawDeg) p=\(pitchDeg) q=\(String(format: "%.2f", face.quality))\(face.isStaticSuspect ? " STATIC" : "")"
+            label.string = "#\(face.trackID) a=\(String(format: "%.4f", face.area)) y=\(yawDeg) p=\(pitchDeg) q=\(String(format: "%.2f", face.quality))\(distance)\(identity)\(face.isStaticSuspect ? " STATIC" : "")"
             label.fontSize = 10
             label.foregroundColor = NSColor.white.cgColor
             label.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor

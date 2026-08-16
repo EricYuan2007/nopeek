@@ -65,10 +65,14 @@ func testIoU() {
 // MARK: - IntruderAssessor
 
 private func makeFace(area: CGFloat, yaw: CGFloat? = 0, pitch: CGFloat? = 0,
-                      quality: Float = 0.5, static: Bool = false) -> FaceInfo {
+                      quality: Float = 0.5, static: Bool = false,
+                      trackID: Int = 0, ownerDistance: Float? = nil,
+                      isOwner: Bool? = nil) -> FaceInfo {
     let side = area.squareRoot()
-    return FaceInfo(boundingBox: CGRect(x: 0.5 - side / 2, y: 0.5 - side / 2, width: side, height: side),
-                    yawRad: yaw, pitchRad: pitch, quality: quality, isStaticSuspect: `static`)
+    return FaceInfo(trackID: trackID,
+                    boundingBox: CGRect(x: 0.5 - side / 2, y: 0.5 - side / 2, width: side, height: side),
+                    yawRad: yaw, pitchRad: pitch, quality: quality, isStaticSuspect: `static`,
+                    ownerDistance: ownerDistance, isOwner: isOwner)
 }
 
 func testAssessorSingleFaceIsOwner() {
@@ -129,7 +133,105 @@ func testAssessorStaticSuppression() {
 func testAssessorOwnerNeverStaticSuppressed() {
     // Pathological: owner's own face flagged static (e.g. user froze for a photo) —
     // owner stays owner regardless; suppression only gates intruders.
-    let faces = [makeFace(area: 0.05, static: true), makeFace(area: 0.01)]
+    let faces = [makeFace(area: 0.05, static: true, trackID: 1), makeFace(area: 0.01, trackID: 2)]
     let result = IntruderAssessor.assess(faces: faces, config: DetectionConfig())
+    expectEqual(result.intruders.count, 1)
+}
+
+// MARK: - V2 owner recognition
+
+private func v2Config(threshold: Float = 0.5) -> DetectionConfig {
+    var config = DetectionConfig()
+    config.ownerRecognitionEnabled = true
+    config.ownerMaxDistance = threshold
+    return config
+}
+
+func testV2OwnerAnchoredByIdentityNotSize() {
+    // The owner's face is SMALLER (leaning back) than the stranger's — V1 would
+    // anchor the stranger; V2 must anchor by identity.
+    let faces = [
+        makeFace(area: 0.01, trackID: 1, ownerDistance: 0.30), // owner, smaller
+        makeFace(area: 0.05, trackID: 2, ownerDistance: 0.90), // stranger, bigger
+    ]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config())
+    expectEqual(result.owner?.trackID, 1, "owner anchored by identity")
+    expectEqual(result.intruders.count, 1, "the bigger stranger is the intruder")
+    expectEqual(result.intruders.first?.trackID, 2)
+}
+
+func testV2StrangerAloneAlerts() {
+    // Owner absent: the lone face matches nobody → stranger → intruder.
+    let faces = [makeFace(area: 0.02, trackID: 1, ownerDistance: 0.85)]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config())
+    expect(result.owner == nil, "no face under threshold → no owner")
+    expectEqual(result.intruders.count, 1, "owner absent + stranger ⇒ alert")
+}
+
+func testV2OwnerAloneIsQuiet() {
+    let faces = [makeFace(area: 0.02, trackID: 1, ownerDistance: 0.25)]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config())
+    expectEqual(result.owner?.trackID, 1)
+    expectEqual(result.intruders.count, 0)
+}
+
+func testV2DisabledFallsBackToHeuristic() {
+    // Recognition off → distances ignored, largest face is owner.
+    let faces = [
+        makeFace(area: 0.01, trackID: 1, ownerDistance: 0.30),
+        makeFace(area: 0.05, trackID: 2, ownerDistance: 0.90),
+    ]
+    let result = IntruderAssessor.assess(faces: faces, config: DetectionConfig())
+    expectEqual(result.owner?.trackID, 2, "V1: largest face is owner")
+    expectEqual(result.intruders.first?.trackID, 1)
+}
+
+func testV2NoDistancesFallsBackToHeuristic() {
+    // Recognition on but this frame computed no distances (feature print failed) →
+    // graceful V1 behavior rather than flagging everyone.
+    let faces = [makeFace(area: 0.05, trackID: 1), makeFace(area: 0.01, trackID: 2)]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config())
+    expectEqual(result.owner?.trackID, 1)
+    expectEqual(result.intruders.count, 1)
+}
+
+func testV2ThresholdBoundary() {
+    let faces = [
+        makeFace(area: 0.03, trackID: 1, ownerDistance: 0.49),
+        makeFace(area: 0.02, trackID: 2, ownerDistance: 0.51),
+    ]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config(threshold: 0.5))
+    expectEqual(result.owner?.trackID, 1, "0.49 < 0.5 → owner")
+    expectEqual(result.intruders.count, 1, "0.51 > 0.5 → stranger")
+}
+
+func testV2VerdictWinsOverRawDistance() {
+    // Regression test for the live-observed false alert: the owner's own frontal
+    // distance hovered at the threshold (d 0.47→0.51 @ nominal 0.5) and crossed it.
+    // The analyzer's deadband verdict (isOwner=true) must win over the raw distance.
+    let faces = [makeFace(area: 0.02, trackID: 1, ownerDistance: 0.51, isOwner: true)]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config(threshold: 0.5))
+    expectEqual(result.owner?.trackID, 1, "verdict owner despite d over nominal threshold")
+    expectEqual(result.intruders.count, 0, "no false alert from threshold hover")
+}
+
+func testV2StrangerVerdictWinsToo() {
+    // Symmetric: a face under the raw threshold but verdict-stranger stays a stranger
+    // (e.g. verdict established at high distance, distance now held in the deadband).
+    let faces = [makeFace(area: 0.02, trackID: 1, ownerDistance: 0.48, isOwner: false)]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config(threshold: 0.5))
+    expect(result.owner == nil, "verdict stranger despite d under nominal threshold")
+    expectEqual(result.intruders.count, 1)
+}
+
+func testV2VerdictParticipatesInIdentityPresence() {
+    // A frame whose ONLY identity info is a verdict (no distance — e.g. distance
+    // pruned but verdict held) must still take the V2 path, not the V1 fallback.
+    let faces = [
+        makeFace(area: 0.01, trackID: 1, isOwner: true),   // owner, smaller
+        makeFace(area: 0.05, trackID: 2),                  // no identity info at all
+    ]
+    let result = IntruderAssessor.assess(faces: faces, config: v2Config())
+    expectEqual(result.owner?.trackID, 1, "verdict-only owner anchors")
     expectEqual(result.intruders.count, 1)
 }

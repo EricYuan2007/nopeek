@@ -19,6 +19,16 @@ let suites: [(String, () -> Void)] = [
     ("quality gate", testAssessorQualityGate),
     ("static suppression", testAssessorStaticSuppression),
     ("owner never static-suppressed", testAssessorOwnerNeverStaticSuppressed),
+    // V2 owner recognition
+    ("v2 owner by identity not size", testV2OwnerAnchoredByIdentityNotSize),
+    ("v2 stranger alone alerts", testV2StrangerAloneAlerts),
+    ("v2 owner alone quiet", testV2OwnerAloneIsQuiet),
+    ("v2 disabled → heuristic", testV2DisabledFallsBackToHeuristic),
+    ("v2 no distances → heuristic", testV2NoDistancesFallsBackToHeuristic),
+    ("v2 threshold boundary", testV2ThresholdBoundary),
+    ("v2 verdict wins over raw distance", testV2VerdictWinsOverRawDistance),
+    ("v2 stranger verdict wins too", testV2StrangerVerdictWinsToo),
+    ("v2 verdict-only frame stays v2", testV2VerdictParticipatesInIdentityPresence),
     // DetectionStateMachine
     ("boots to monitoring", testMachineBootsToMonitoring),
     ("flicker never alerts", testMachineFlickerNeverAlerts),

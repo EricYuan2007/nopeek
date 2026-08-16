@@ -31,6 +31,8 @@ final class SettingsStore: ObservableObject {
         static let bubbleY = "bubbleY"
         static let ownerAbsentBlurEnabled = "ownerAbsentBlurEnabled"
         static let ownerAbsentDelaySeconds = "ownerAbsentDelaySeconds"
+        static let ownerRecognitionEnabled = "ownerRecognitionEnabled"
+        static let ownerMaxDistance = "ownerMaxDistance"
     }
 
     // MARK: - Monitoring
@@ -53,6 +55,13 @@ final class SettingsStore: ObservableObject {
     @Published var alertNotification = true { didSet { persist(Key.alertNotification, alertNotification) } }
     /// 0 = single ping per episode; >0 = repeat every N seconds while alerting.
     @Published var soundRepeatSeconds = 0.0 { didSet { persist(Key.soundRepeatSeconds, soundRepeatSeconds) } }
+
+    // MARK: - Owner recognition (V2)
+
+    /// Identity-based owner anchoring. Auto-enabled after enrollment; requires samples.
+    @Published var ownerRecognitionEnabled = false { didSet { persist(Key.ownerRecognitionEnabled, ownerRecognitionEnabled) } }
+    /// Feature-print distance ceiling for "this is the owner". Lower = stricter.
+    @Published var ownerMaxDistance = 0.55 { didSet { persist(Key.ownerMaxDistance, ownerMaxDistance) } }
 
     // MARK: - Owner-absence protection (人一走就模糊)
 
@@ -89,6 +98,8 @@ final class SettingsStore: ObservableObject {
             Key.bubbleY: Double.nan,
             Key.ownerAbsentBlurEnabled: false,
             Key.ownerAbsentDelaySeconds: 5.0,
+            Key.ownerRecognitionEnabled: false,
+            Key.ownerMaxDistance: 0.55,
         ])
         monitoringEnabled = defaults.bool(forKey: Key.monitoringEnabled)
         alertVisual = defaults.bool(forKey: Key.alertVisual)
@@ -106,6 +117,8 @@ final class SettingsStore: ObservableObject {
         bubbleY = defaults.double(forKey: Key.bubbleY)
         ownerAbsentBlurEnabled = defaults.bool(forKey: Key.ownerAbsentBlurEnabled)
         ownerAbsentDelaySeconds = defaults.double(forKey: Key.ownerAbsentDelaySeconds)
+        ownerRecognitionEnabled = defaults.bool(forKey: Key.ownerRecognitionEnabled)
+        ownerMaxDistance = defaults.double(forKey: Key.ownerMaxDistance)
     }
 
     private func persist(_ key: String, _ value: Any) {
